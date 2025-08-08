@@ -11,6 +11,7 @@ wc = sc.textFile('../data/brown_nolines.txt') \
        .reduceByKey(lambda a,b: a+b)
 
 freqs = dict(wc.collect())
-print('freq of "this":', freqs['this'])
+for w in 'the|of|and|to|in|that|is|was|he'.split('|'):
+    print(f'freq of "{w}":\t{freqs[w]}')
 
 

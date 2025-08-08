@@ -1,3 +1,5 @@
+# note: console is https://us-east-2.console.aws.amazon.com/ec2/home?region=us-east-2#Instances:v=3;$case=tags:true%5C,client:false;$regex=tags:false%5C,client:false;sort=desc:instanceState
+
 # workers.json maps internal machine names to their external names
 workers.json:
 	aws ec2 describe-instances \
@@ -14,17 +16,16 @@ launch:
 	    --security-groups launch-wizard-1 \
 	    --key-name hazsoup \
 	    --count 4 > launch-log.json
-	aws ec2 describe-instances | \
-	    grep -i publicdns | cut -d\" -f4 | uniq | grep com > workers.txt
 
 # cluster test
 
 wc_hz:
 	python3 hazsoup.py cloud setup --local_files wc_hz.py	
-	python3 hazsoup.py fs put ../data/bluecorpus.txt blue.txt
-	python3 hazsoup.py run map_reduce wc_hz.py WordCount blue.txt bluecounts.txt
-	python3 hazsoup.py fs get_merge bluecounts.txt bluecounts.txt
-	grep -w this bluecounts.txt | head -10
+	python3 hazsoup.py fs put ../data/brown_nolines.txt brown.txt
+	python3 hazsoup.py run map_reduce wc_hz.py WordCount brown.txt browncounts.txt
+	python3 hazsoup.py fs get_merge browncounts.txt /tmp/brown_counts.txt
+	head /tmp/brown_counts.txt
+	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 # local tests
 
