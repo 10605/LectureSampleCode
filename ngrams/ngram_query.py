@@ -116,7 +116,7 @@ The options --B, --C, ..., --E are similar.
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(epilog=QUERY_USAGE)
-    parser.add_argument('--ngram_file', default='data/aeffect-train.txt')
+    parser.add_argument('--ngram_file', default='../data/aeffect-train.txt')
     parser.add_argument('--top', default=10, type=int)
     for v in "ABCED":
         parser.add_argument(f'--{v}')
