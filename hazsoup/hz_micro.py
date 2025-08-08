@@ -1,6 +1,5 @@
 import collections
 from collections.abc import Iterator
-import json
 import subprocess
 import os
 
@@ -70,3 +69,4 @@ class Worker:
                     pair = (key, reduced_value)
                     fp.write(str(pair) + '\n')
         
+

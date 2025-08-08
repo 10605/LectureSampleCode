@@ -46,3 +46,4 @@ class Worker:
                 for reduced_value in self.reduce(key, values):
                     pair = (key, reduced_value)
                     fp.write(str(pair) + '\n')
+

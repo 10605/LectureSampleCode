@@ -28,21 +28,20 @@ wc_hz:
 
 # local tests
 
-wc_nano_map_only:
-	python3 -m fire wc_nano.py WordCount map_only ../data/bluecorpus.txt bluecounts.txt 
-	grep -w this bluecounts.txt | head -10
+wc_ctr:
+	python3 wc_ctr.py
 
 wc_nano:
-	python3 -m fire wc_nano.py WordCount map_reduce ../data/bluecorpus.txt bluecounts.txt 
-	grep -w this bluecounts.txt | head -10
-
-wc_micro_map_only:
-	python3 -m fire wc_micro.py WordCount map_only ../data/bluecorpus.txt bluecounts.txt 
-	grep -w this bluecounts.txt | head -10
+	python3 -m fire wc_nano.py \
+	  WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
+	head /tmp/brown_counts.txt
+	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 wc_micro:
-	python3 -m fire wc_micro.py WordCount map_reduce ../data/bluecorpus.txt bluecounts.txt 
-	grep -w this bluecounts.txt | head -10
+	python3 -m fire wc_micro.py \
+	  WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
+	head /tmp/brown_counts.txt
+	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 wc_spork:
 	python3 wc_spork.py

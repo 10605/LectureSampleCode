@@ -1,5 +1,7 @@
 from collections import Counter
+from pprint import pprint
 import re
+
 
 if __name__ == '__main__':
     
@@ -11,3 +13,5 @@ if __name__ == '__main__':
             freq[word] += 1
 
 
+    # print a few counts
+    pprint(freq.most_common(10))
