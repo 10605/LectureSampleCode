@@ -1,13 +1,11 @@
 # note: console is https://us-east-2.console.aws.amazon.com/ec2/home?region=us-east-2#Instances:v=3;$case=tags:true%5C,client:false;$regex=tags:false%5C,client:false;sort=desc:instanceState
 
-# workers.json maps internal machine names to their external names
-workers.json:
-	aws ec2 describe-instances \
-	--query Reservations[1].Instances[].NetworkInterfaces[].PrivateIpAddresses[0].[PrivateDnsName,Association.PublicDnsName] \
-	> workers.json
+# stop all running instances
 
 stop:
 	aws ec2 stop-instances --instance-ids `aws ec2 describe-instances | grep -i instanceid | cut -d\" -f4`
+
+# launch a cluster
 
 launch:
 	aws ec2 run-instances \
@@ -17,9 +15,17 @@ launch:
 	    --key-name hazsoup \
 	    --count 4 > launch-log.json
 
+# workers.json maps internal machine names to their external names
+
+workers.json:
+	aws ec2 describe-instances \
+	--query Reservations[0].Instances[].NetworkInterfaces[].PrivateIpAddresses[0].[PrivateDnsName,Association.PublicDnsName] \
+	> workers.json
+
+
 # cluster test
 
-wc_hz:
+wc_hz: workers.json
 	python3 hazsoup.py cloud setup --local_files wc_hz.py	
 	python3 hazsoup.py fs put ../data/brown_nolines.txt brown.txt
 	python3 hazsoup.py run map_reduce wc_hz.py WordCount brown.txt browncounts.txt
