@@ -18,10 +18,8 @@ launch:
 # workers.json maps internal machine names to their external names
 
 workers.json:
-	aws ec2 describe-instances \
-	--query Reservations[0].Instances[].NetworkInterfaces[].PrivateIpAddresses[0].[PrivateDnsName,Association.PublicDnsName] \
+	aws ec2 describe-instances --query 'Reservations[-1].Instances[].[PrivateDnsName,PublicDnsName]' \
 	> workers.json
-
 
 # cluster test
 
