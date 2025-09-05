@@ -37,6 +37,9 @@ class CloudBase:
             self.workers = [
                 external_name
                 for _internal_name, external_name in internal_external_pairs]
+            # internal2external is used only to figure out the
+            # external name of the worker node that a process is
+            # running on
             self.internal2external = dict(internal_external_pairs)
         except FileNotFoundError:
             print(f'warning: could not open {self.worker_file}')
@@ -122,9 +125,23 @@ class Worker(CloudBase):
                 # figure out where to send this line
                 key_worker_idx = ru.kv_keyhash(key) % len(coworkers)                
                 # and send it to the correct coworker
-                coworker_processes[key_worker_idx].stdin.write(kv_line)
-
-        # TODO: work out error handling
+                try:
+                    coworker_processes[key_worker_idx].stdin.write(kv_line)
+                except BrokenPipeError as ex:
+                    # do_map_and_shuffle is normally called via ssh and errors
+                    # are passed back via Cloud._report which looks as stderr
+                    # This exception indicates a worker error - so pass the error
+                    # messages back to stderr
+                    failing_coworker = coworkers[key_worker_idx]
+                    print(
+                        f'Error raised when {this_worker} wrote to {failing_coworker}'
+                        + f' index={key_worker_idx}:', file=sys.stderr)
+                    print(f'{ex}', file=sys.stderr)
+                    print(f'stderr from {failing_coworker}:',
+                          file=sys.stderr)
+                    for line in coworker_processes[key_worker_idx].stderr:
+                        print(line, end='', file=sys.stderr)
+                    return
         # close the coworker processes and report any errors
         for proc, worker in zip(coworker_processes, coworkers):
             proc.stdin.close()

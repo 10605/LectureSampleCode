@@ -22,13 +22,23 @@ class Cloud(CloudBase):
     """
     # utilities
 
-    def _completion_progress(self, processes, delay=0.25):
+    def _completion_progress(self, processes, workers=None, show_unfinished=True, delay=0.25):
         """A progress bar for process completion.
+
+        Show a lot of extra information if show_unfinished is true: in
+        this case, workers should be a parallel list of the names of
+        workers running the processes.
         """
         for n in tqdm(range(len(processes))):
             finished = []
             while len(finished) < n:
                 finished = [p for p in processes if p.poll() is not None]
+                if workers is not None and show_unfinished:
+                    unfinished = [(w, p.poll()) for w, p in zip(workers, processes) if p.poll() is None]
+                    if unfinished:
+                        for w,p in unfinished:
+                            print('still running:', len(unfinished), w, p)
+                        print()
                 time.sleep(delay)
 
     def _report(self, proc, worker):
@@ -68,6 +78,7 @@ class Cloud(CloudBase):
                 shlex.split(f'ssh {self.ssh_args()} {worker} {command}'),
                 text=True, stderr=PIPE, stdout=PIPE)
             for worker in self.workers]
+        #self._completion_progress(processes, show_unfinished=True, workers=self.workers) ***
         self._completion_progress(processes)
         for proc, worker in zip(processes, self.workers):
             self._report(proc, worker)
@@ -86,6 +97,8 @@ class Cloud(CloudBase):
 
     def upload(self, filenames):
         """Copy a file to all workers.
+
+        TODO: parallelize upload
         """
         sample_command = (
             f'scp {self.scp_args()} {filenames}' 
