@@ -87,12 +87,10 @@ class Worker(CloudBase):
         """Name of a single output shard from a worker.
         """
         stem = os.path.basename(src)
-        return f'sortout-{stem}-from-w{worker_idx:02d}.tsv'
+        return f'mapout-{stem}-from-w{worker_idx:02d}.tsv'
 
     def do_map_and_shuffle(self, src):
         """Run mapper on src and distribute shards to co-workers. 
-
-        Distributed shards are sorted by key.
         """
         this_worker = self.internal2external[socket.gethostname()]
         coworkers = self.workers
@@ -101,19 +99,13 @@ class Worker(CloudBase):
         # outputs, and send the shards to an appropriate worker.
 
         # set up a process on each co-worker machine to accept the
-        # appropriate shard of data from this worker.  These processes
-        # will sort the incoming data by key - that needs to be done
-        # anyway for the reduce
-        def sort_pipe_command_str(worker):
-            dst = self._shard_bufname(src, coworkers.index(this_worker))
-            result = f'ssh {self.ssh_args()} {worker} LC_ALL=C sort -k1 -o {dst}'
-            return result
-        sample_command = sort_pipe_command_str(coworkers[0])
-        logging.info(f'sample pipe: {sample_command}')
+        # appropriate shard of data from this worker.
+        dst = self._shard_bufname(src, coworkers.index(this_worker))
         coworker_processes = [
             Popen(
-                sort_pipe_command_str(worker),
-                text=True, stderr=PIPE, stdin=PIPE, shell=True)
+                shlex.split(
+                    f'ssh {self.ssh_args()} {worker} cat > {dst}'),
+                text=True, stderr=PIPE, stdin=PIPE)
             for worker in coworkers
         ]
         # run the map and distribute the data to the processes,
@@ -123,15 +115,16 @@ class Worker(CloudBase):
                 # convert the pair to a sortable line
                 kv_line = ru.kv_to_line(key, val)
                 # figure out where to send this line
-                key_worker_idx = ru.kv_keyhash(key) % len(coworkers)                
+                key_worker_idx = ru.kv_keyhash(key) % len(coworkers)
                 # and send it to the correct coworker
                 try:
                     coworker_processes[key_worker_idx].stdin.write(kv_line)
                 except BrokenPipeError as ex:
-                    # do_map_and_shuffle is normally called via ssh and errors
-                    # are passed back via Cloud._report which looks as stderr
-                    # This exception indicates a worker error - so pass the error
-                    # messages back to stderr
+                    # do_map_and_shuffle is normally called via ssh
+                    # and errors are only reported if they go to
+                    # stderr.  This exception indicates a worker
+                    # error, that needs to be passed back to the ssh
+                    # caller.
                     failing_coworker = coworkers[key_worker_idx]
                     print(
                         f'Error raised when {this_worker} wrote to {failing_coworker}'
@@ -160,14 +153,12 @@ class Worker(CloudBase):
         
         # second stage of the map-reduce - gather shards sent by the
         # other workers in the do_map_and_shuffle stage and run reduce
-        # on them
-
         incoming_shards = [
             self._shard_bufname(src, i) for i in range(len(coworkers))
         ]
         stem = os.path.basename(src)
         merge_dst =  f'mergeout-{stem}.tsv'
-        merge_sort_cmd = (f'LC_ALL=C sort -k1 -m -o {merge_dst} '
+        merge_sort_cmd = (f'LC_ALL=C sort -k1 -o {merge_dst} '
                           + ' '.join(incoming_shards))
         # TODO: work out error handling
         check_call(merge_sort_cmd, shell=True)

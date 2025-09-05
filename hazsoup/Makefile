@@ -35,7 +35,7 @@ workers.json:
 # cluster test
 
 wc_hz: workers.json
-	python3 hazsoup.py cloud setup --local_files wc_hz.py	
+	python3 hazsoup.py cloud setup --local_files wc_hz.py
 	python3 hazsoup.py fs put ../data/brown_nolines.txt brown.txt
 	python3 hazsoup.py run map_reduce wc_hz.py WordCount brown.txt browncounts.txt
 	python3 hazsoup.py fs get_merge browncounts.txt /tmp/brown_counts.txt
