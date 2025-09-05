@@ -30,6 +30,10 @@ class CloudBase:
         self.keypair_file = 'hazsoup.pem'
         try:
             internal_external_pairs = json.load(open(self.worker_file))
+            # remove pairs without external DNS
+            internal_external_pairs = [
+                (internal, external) for (internal, external) in internal_external_pairs
+                if external != ""]
             self.workers = [
                 external_name
                 for _internal_name, external_name in internal_external_pairs]

@@ -1,11 +1,22 @@
 # note: console is https://us-east-2.console.aws.amazon.com/ec2/home?region=us-east-2#Instances:v=3;$case=tags:true%5C,client:false;$regex=tags:false%5C,client:false;sort=desc:instanceState
 
+default:
+	echo make targets: 'stop launch wc_[ctr|nano|micro|hz|spork]'
+
 # stop all running instances
 
 stop:
 	aws ec2 stop-instances --instance-ids `aws ec2 describe-instances | grep -i instanceid | cut -d\" -f4`
 
 # launch a cluster
+
+launch_k:
+	aws ec2 run-instances \
+	    --image-id ami-0c803b171269e2d72 \
+	    --instance-type t2.micro \
+	    --security-groups launch-wizard-1 \
+	    --key-name hazsoup \
+	    --count $(K) > launch-log.json
 
 launch:
 	aws ec2 run-instances \
@@ -18,7 +29,7 @@ launch:
 # workers.json maps internal machine names to their external names
 
 workers.json:
-	aws ec2 describe-instances --query 'Reservations[-1].Instances[].[PrivateDnsName,PublicDnsName]' \
+	aws ec2 describe-instances --query 'Reservations[].Instances[].[PrivateDnsName,PublicDnsName]' \
 	> workers.json
 
 # cluster test
