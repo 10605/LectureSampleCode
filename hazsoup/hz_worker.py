@@ -92,15 +92,20 @@ class Worker(CloudBase):
 
     def do_map_and_shuffle(self, src):
         """Run mapper on src and distribute shards to co-workers. 
+
+        This algorithm is a straightforward hash-shuffle, but doesn't
+        scale well.
+
         """
         this_worker = self.internal2external[socket.gethostname()]
         coworkers = self.workers
 
-        # first stage of a map-reduce: run the map process, shard the
-        # outputs, and send the shards to an appropriate worker.
+        # run the map process, shard the outputs, and immediately send
+        # the shards to an appropriate worker.
 
-        # set up a process on each co-worker machine to accept the
-        # appropriate shard of data from this worker.
+        # coworker_processes contains a process on each co-worker
+        # machine to accept the appropriate shard of data from this
+        # worker.  These files will need to be sorted by the reducer.
         dst = self._shard_bufname(src, coworkers.index(this_worker))
         coworker_processes = [
             Popen(
@@ -125,7 +130,8 @@ class Worker(CloudBase):
                     # and errors are only reported if they go to
                     # stderr.  This exception indicates a worker
                     # error, that needs to be passed back to the ssh
-                    # caller.
+                    # caller. Worker errors do occur for large
+                    # clusters.
                     failing_coworker = coworkers[key_worker_idx]
                     print(
                         f'Error raised when {this_worker} wrote to {failing_coworker}'
@@ -136,7 +142,8 @@ class Worker(CloudBase):
                     for line in coworker_processes[key_worker_idx].stderr:
                         print(line, end='', file=sys.stderr)
                     return
-        # close the coworker processes and report any errors
+
+        #  Close the coworker processes and report any errors
         for proc, worker in zip(coworker_processes, coworkers):
             proc.stdin.close()
             proc.wait()
@@ -152,8 +159,9 @@ class Worker(CloudBase):
         """
         coworkers = self.workers
         
-        # second stage of the map-reduce - gather shards sent by the
-        # other workers in the do_map_and_shuffle stage and run reduce
+        # Second stage of the map-reduce - gather shards sent by the
+        # other workers in the do_map_and_shuffle stage, merge-sort them,
+        # and reduce
         incoming_shards = [
             self._shard_bufname(src, i) for i in range(len(coworkers))
         ]
@@ -181,7 +189,10 @@ class Worker(CloudBase):
 class SeqWorker(Worker):
     """An abstract worker for map-reduce tasks.
 
-    Optimized to produce fewer file/exchange events.
+    Optimized to produce fewer file/exchange events.  The algorithm
+    used by the standard worker leads to instability on larger
+    clusters, probably because you gave P^2 pipes open with a cluster
+    of P machines.
     """
 
     def _shard_bufname_by_recipient(self, src, worker_idx):
@@ -193,39 +204,47 @@ class SeqWorker(Worker):
     def do_map_and_shuffle(self, src):
         """Run mapper on src and prepare shards for co-workers. 
         """
+
+        # Run the map process and save output in local files, one for
+        # each reducer, and sort each local file.
+
         coworkers = self.workers
-
-        # first stage of a map-reduce: run the map process, shard the
-        # outputs, and send the shards to an appropriate worker.
-
-        # set up a process on each co-worker machine to accept the
-        # appropriate shard of data from this worker.
         try:
             coworker_fp = [
                 open(self._shard_bufname_by_recipient(src, i), 'w')
                 for i in range(len(coworkers))]
-            # run the map and decide what reducer will get
-            # each map output, based on the key
             for line in open(src):
+                # run the mapper
                 for key, val in self.map(line):
                     # convert the pair to a sortable line
                     kv_line = ru.kv_to_line(key, val)
-                    # figure out where to send this line
+                    # figure out where to save this line and write it
                     key_worker_idx = ru.kv_keyhash(key) % len(coworkers)
-                    # and send it to the correct coworker
                     coworker_fp[key_worker_idx].write(kv_line)
         finally:
             for fp in coworker_fp:
                 fp.close()
         
+        # sort the sharded data files - doing it here is marginally
+        # faster than sorting on the reducer side
+        for i in range(len(coworkers)):
+            shard = self._shard_bufname_by_recipient(src, i)
+            sort_command = f'LC_ALL=C sort -k1 {shard} -o {shard}'
+            check_call(sort_command, shell=True)
+
     def do_gather_reduce(self, src, dst):
         """Merge shards generated by do_map_and_shuffle and then reduce.
         """
+
+        # First step - collect all the files that are were generated
+        # by mappers that are intended for this worker.
+
         this_worker = self.internal2external[socket.gethostname()]
         this_index = self.workers.index(this_worker)
-        indexed_coworkers = list(enumerate(self.workers))
         my_shard = self._shard_bufname_by_recipient(src, this_index)
-        
+        # collect files in random order to reduce contention,
+        # since all the reducers are doing this in parallel
+        indexed_coworkers = list(enumerate(self.workers))
         random.shuffle(indexed_coworkers)
         for i, worker in indexed_coworkers:
             check_call(
@@ -234,24 +253,21 @@ class SeqWorker(Worker):
                 + f' {self._shard_bufname(src, i)}',
                 shell=True)
             
-        # second stage of the map-reduce - gather shards sent by the
-        # other workers in the do_map_and_shuffle stage and run reduce
+        # Second step - merge-sort the collected files
         incoming_shards = [
             self._shard_bufname(src, i) for i in range(len(indexed_coworkers))
         ]
         stem = os.path.basename(src)
         merge_dst =  f'mergeout-{stem}.tsv'
-        merge_sort_cmd = (f'LC_ALL=C sort -k1 -o {merge_dst} '
+        merge_sort_cmd = (f'LC_ALL=C sort -k1 -m -o {merge_dst} '
                           + ' '.join(incoming_shards))
-        # TODO: work out error handling
         check_call(merge_sort_cmd, shell=True)
 
-        # create a generator for the sorted pairs so we can reduce
+        # Third step - run the reducer and save output in 'dst'
+
         def pair_generator():
             for line in open(merge_dst):
                 yield ru.kv_from_line(line)
-
-        # convert pair_generator and invoke and save output of reduce
         with open(dst, 'w') as fp:
             for key, values in ru.ReduceReady(pair_generator()):
                 for reduced_value in self.reduce(key, values):
