@@ -231,7 +231,7 @@ class SeqWorker(Worker):
             check_call(
                 f'scp {self.scp_args()}'
                 + f' {self.cloud_username}@{worker}:{my_shard}'
-                + f' {self._shard_bufname(src, this_index)}',
+                + f' {self._shard_bufname(src, i)}',
                 shell=True)
             
         # second stage of the map-reduce - gather shards sent by the

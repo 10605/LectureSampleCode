@@ -2,7 +2,7 @@ import re
 
 import hz_worker as hz
 
-class WordCount(hz.Worker):
+class WordCount(hz.SeqWorker):
     
     def map(self, x):
         for word in re.findall('\w+', x.lower()):

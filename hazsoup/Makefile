@@ -42,6 +42,14 @@ wc_hz: workers.json
 	head /tmp/brown_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
+wc_enron: workers.json
+	python3 hazsoup.py cloud setup --local_files wc_hz.py
+	python3 hazsoup.py fs put ~/Documents/data/enron/enron-clean.txt enron.txt
+	time python3 hazsoup.py run map_reduce wc_hz.py WordCount enron.txt enroncounts.txt
+	python3 hazsoup.py fs get_merge enroncounts.txt /tmp/enron_counts.txt
+	head /tmp/enron_counts.txt
+	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/enron_counts.txt
+
 # local tests
 
 wc_ctr:
