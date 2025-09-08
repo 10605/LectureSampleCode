@@ -225,7 +225,7 @@ class SeqWorker(Worker):
             for fp in coworker_fp:
                 fp.close()
         
-        # sort the sharded data files - doing it here is marginally
+        # Sort the sharded data files - doing it here is marginally
         # faster than sorting on the reducer side
         for i in range(len(coworkers)):
             shard = self._shard_bufname_by_recipient(src, i)
