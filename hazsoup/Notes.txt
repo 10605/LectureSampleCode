@@ -1,0 +1,82 @@
+Summary:
+					target
+hz_micro	61m6.805s = 3666.81	
+10SeqWorkers	 6m40.72s =  400.72	366.681 ~  9.3% slower
+20SeqWorkers	 3m46.96s =  226.96	183.341	~ 23.8% slower
+
+~/Documents/data/enron/enron-lines.txt is 1.3Gb
+~/Documents/data/enron/enron-clean.txt has non-ascii chars (removed with sed)
+
+timing:
+
+unix tools...
+real    24m3.910s
+user    10m12.379s
+sys     11m1.944s
+
+hz micro...
+real    61m6.805s = 3666.805
+user    16m46.567s
+sys     74m54.169s
+
+[but very different # tokens]
+
+-------------------- 10 workers --------------------
+
+hz: cloud setup
+real    0m43.887s
+user    0m2.799s
+sys     0m0.577s
+
+hz: fs put
+real    2m2.579s
+user    0m26.770s
+sys     0m2.582s
+
+hz: run map_reduce
+real    6m44.480s
+user    0m0.852s
+sys     0m0.210s
+
+-------- after updates and postponing sort ----------
+
+real    6m43.279s
+user    0m1.592s
+sys     0m0.280s
+
+with SeqWorker
+
+      400.72 real         1.76 user         0.21 sys
+      6:40.72s
+
+-------------------- 20 workers --------------------
+hz: cloud setup
+real    1m19.151s
+user    0m5.678s
+sys     0m0.942s
+
+hz: fs put
+real    0m41.591s
+user    0m23.828s
+sys     0m2.392s
+
+hz: run map_reduce - fails (not clear why)
+  File "/home/ec2-user/hz_worker.py", line 125, in do_map_and_shuffle
+    coworker_processes[key_worker_idx].stdin.write(kv_line)
+BrokenPipeError: [Errno 32] Broken pipe
+
+debugging:
+ - not too many sort processes (but postponing them doesn't matter)
+pipes break because:
+ - kex_exchange_identification: read: Connection reset by peer
+ - Connection reset by 172.31.18.119 port 22
+
+went to a sequential process (hz.SeqWorker) - which seems to work,
+although it's a little slower than parallelizing everything:
+
+real    3m49.407s = 229.41s
+user    0m3.176s
+sys     0m0.306s
+
+Probably would be faster to pre-sort at the map size and merge-sort at the reduce side
+      226.96 real         3.15 user         0.28 sys

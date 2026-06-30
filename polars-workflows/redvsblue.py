@@ -1,9 +1,3 @@
-import collections
-import functools
-import math
-import operator
-import re
-
 import polars as pl
 
 fg_lines = pl.scan_lines("../data/bluecorpus.txt")

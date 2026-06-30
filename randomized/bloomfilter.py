@@ -12,7 +12,7 @@ BITS_PER_INT = 31
 
 class BloomFilter(object):
 
-    def __init__(self,seed=0,maxInserts=10000,falsePosProb=0.01):
+    def __init__(self, seed=0, maxInserts=10000, falsePosProb=0.01):
         self.num_bits = int(2 * maxInserts*math.log(1.0/falsePosProb) + 0.5)
         self.num_hashes = int(1.5 * math.log(1.0/falsePosProb) + 0.5)
         self.bits = []
@@ -25,21 +25,21 @@ class BloomFilter(object):
         for i in range(self.num_hashes):
             self.ithHashSeed.append(rnd.getrandbits(BITS_PER_INT))
 
-    def ithHash(self,i,value):
+    def ithHash(self, i, value):
         return (self.ithHashSeed[i] ^ hash(value)) % self.num_bits
 
-    def insert(self,value):
+    def insert(self, value):
         for i in range(self.num_hashes):
             hi = self.ithHash(i,value)
             self.setbit(hi)
 
-    def contains(self,value):
+    def contains(self, value):
         for i in range(self.num_hashes):
             hi = self.ithHash(i,value)
             if not self.testbit(hi): return False
         return True
 
-    def setbit(self,index):
+    def setbit(self, index):
         self.bits[index//BITS_PER_INT] = int(self.bits[index//BITS_PER_INT] | (1 << (index % BITS_PER_INT)))
 
     def testbit(self,index):

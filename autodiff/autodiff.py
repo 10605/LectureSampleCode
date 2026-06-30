@@ -8,8 +8,8 @@ PROGRAM1 = [('z1', 'add', ['x1', 'x1']),
            ('z2', 'add', ['z1', 'x2']),
            ('f', 'square', ['z2'])]
 
-PROGRAM = [('z', 'square', ['x']),
-           ('f', 'ln', ['z'])]
+PROGRAM2 = [('z', 'square', ['x']),
+            ('f', 'ln', ['z'])]
 
 # Function library
 G = {
@@ -45,13 +45,10 @@ def backward(opseq, val, delta):
             print(f'delta[{xi}] += {dy_dxi}')
 
 if __name__ == '__main__':
-    #val = dict(x1=2, x2=3)
-    val = dict(x=4)
-    forward(PROGRAM, val) 
-    print(f'{val=}')
+    val = dict(x1=2, x2=3)
+    forward(PROGRAM1, val) 
+    print(f'f(2,3) = {val["f"]} {val=}')
     delta = collections.defaultdict(float)
     delta['f'] = 1.0
-    backward(PROGRAM, val, delta)
-    print(f'{delta=}')
-
-    
+    backward(PROGRAM1, val, delta)
+    print(f'{delta["x1"]=} {delta["x2"]=} {delta=}')

@@ -1,5 +1,14 @@
+# emacs
+*~
+
 # AMS keys
 hazsoup/*.pem
+
+# misc output files
+autodiff/*.gv
+autodiff/*.gv.pdf
+hazsoup/*.json
+unix-poetry/*.wc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
