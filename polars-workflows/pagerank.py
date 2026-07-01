@@ -3,7 +3,7 @@ import time
 import polars as pl
         
 RESET = 0.15
-NUM_ITERATIONS = 10
+NUM_ITERATIONS = 20
 
 def show(msg, ldf, k=10):
     """Give a quick view of the contents of a lazy dataframe.
@@ -79,7 +79,7 @@ for t in range(NUM_ITERATIONS):
     )
 
 
-print('scores collected:',time.time() - start,'sec')
+print('scores collected [pure polar]:',time.time() - start,'sec')
 
 pagerank_scores=pagerank_scores.sort('score', descending=True)
 
