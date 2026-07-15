@@ -49,7 +49,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
     show('pagerank_scores', pagerank_scores)
 
     #
-    # main loop
+    # main loop - this assumes all nodes have indegree >=1 and outdegree >= 1
     #
     start = time.time()
     for t in range(num_iterations):
