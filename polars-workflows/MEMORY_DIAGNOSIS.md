@@ -43,6 +43,9 @@ CSE_OFF peak_rss  929.0 MB
 
 ~110 MB, not the ~600 MB the demo is trying to show. **CSE is not the cause.**
 
+(Reproduce with the `--no-cse` flag on `demo_memory.py` or `pagerank.py`, e.g.
+`python demo_memory.py --nodes 20000 --edges 4000000 --no-cse`.)
+
 ## Actual cause: streaming group-by / join buffer their input
 
 Isolating each pipeline stage on the same fixed 20k-node graph, sweeping edges

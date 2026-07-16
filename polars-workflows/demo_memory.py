@@ -27,6 +27,9 @@ Usage:
     # tune it:
     python demo_memory.py --nodes 20000 --edges 200000 1000000 4000000 --iterations 10
 
+    # rule out common-subplan-elimination caching (see MEMORY_DIAGNOSIS.md):
+    python demo_memory.py --no-cse
+
     # A single run (this is what the table driver spawns internally):
     python demo_memory.py --single --mode lazy --graph /tmp/g.txt --iterations 10
 """
@@ -80,12 +83,12 @@ def make_lines(path, mode):
     return scan
 
 
-def run_single(mode, path, iterations):
+def run_single(mode, path, iterations, cse=True):
     """Run pagerank once and report this process's peak RSS."""
     pagerank.VERBOSE = 0                              # silence show() output
     lines = make_lines(path, mode)
     start = time.time()
-    pagerank.pagerank(lines, num_iterations=iterations)
+    pagerank.pagerank(lines, num_iterations=iterations, cse=cse)
     elapsed = time.time() - start
     # markers parsed by the table driver
     print(f'PEAK_RSS_MB {peak_rss_mb():.1f}')
@@ -99,7 +102,7 @@ def _parse_marker(text, marker):
     return float('nan')
 
 
-def run_matrix(nodes, edge_sizes, iterations):
+def run_matrix(nodes, edge_sizes, iterations, cse=True):
     """Spawn a fresh subprocess per (edges, mode) and tabulate peak RSS."""
     rows = []
     for m in edge_sizes:
@@ -107,11 +110,12 @@ def run_matrix(nodes, edge_sizes, iterations):
         total_lines = generate_graph(path, nodes, m)
         row = {'lines': total_lines}
         for mode in ('lazy', 'eager'):
-            proc = subprocess.run(
-                [sys.executable, __file__, '--single',
-                 '--mode', mode, '--graph', path,
-                 '--iterations', str(iterations)],
-                capture_output=True, text=True)
+            cmd = [sys.executable, __file__, '--single',
+                   '--mode', mode, '--graph', path,
+                   '--iterations', str(iterations)]
+            if not cse:
+                cmd.append('--no-cse')
+            proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 sys.stderr.write(proc.stderr)
                 proc.check_returncode()
@@ -121,7 +125,7 @@ def run_matrix(nodes, edge_sizes, iterations):
         os.remove(path)
 
     print()
-    print(f'Fixed nodes = {nodes:,}   iterations = {iterations}')
+    print(f'Fixed nodes = {nodes:,}   iterations = {iterations}   CSE = {"on" if cse else "off"}')
     print('(peak RSS should stay ~flat for lazy as edges grow; eager climbs)')
     print()
     hdr = f'{"total lines":>14}  {"lazy RSS MB":>12}  {"eager RSS MB":>13}  {"lazy s":>7}  {"eager s":>8}'
@@ -147,9 +151,12 @@ if __name__ == '__main__':
                         help='edge counts to sweep for the comparison table')
     parser.add_argument('--iterations', type=int, default=10,
                         help='pagerank iterations per run')
+    parser.add_argument('--no-cse', action='store_true',
+                        help='disable common-subplan elimination in pagerank '
+                             '(memory experiment; see MEMORY_DIAGNOSIS.md)')
     args = parser.parse_args()
 
     if args.single:
-        run_single(args.mode, args.graph, args.iterations)
+        run_single(args.mode, args.graph, args.iterations, cse=not args.no_cse)
     else:
-        run_matrix(args.nodes, args.edges, args.iterations)
+        run_matrix(args.nodes, args.edges, args.iterations, cse=not args.no_cse)
