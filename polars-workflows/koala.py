@@ -1,5 +1,4 @@
-"""
-koala.py -- guaranteed memory-efficient group-by / join / unique for polars,
+"""koala.py -- guaranteed memory-efficient group-by / join / unique for polars,
 built map-reduce style (guineapig lineage, hence the name) *without* the
 distribution.
 
@@ -7,7 +6,10 @@ The trick: never rely on polars' streaming group_by/join, which buffer their
 input proportional to the number of rows (see MEMORY_DIAGNOSIS.md). Instead
 
   1. sink the (key, value) columns to a TSV on disk,
-  2. sort that file with unix `sort` (external, spills to disk, LC_ALL=C),
+
+  2. sort that file with something that is memory-efficient: unix
+     `sort` (external, spills to disk, with env var LC_ALL=C)
+
   3. stream through the sorted file collapsing contiguous runs of equal keys
      into (key, aggregate) rows, and feed those back into polars via an IO
      plugin (register_io_source).
@@ -25,8 +27,9 @@ pagerank.py equivalents this is meant to replace:
   edges.group_by('src').len()                       -> group_by_key(edges, 'src', reduce('dst', via=len))
   ...group_by('dst').agg(pl.col('delta').sum()...)  -> group_by_key(msgs,  'dst', reduce('delta', via=sum))
 
-proposal (still to build): join(left, right, on=, how=), unique(ldf)
 """
+
+from __future__ import annotations 
 
 import json
 import os
@@ -41,17 +44,162 @@ from polars.io.plugins import register_io_source
 
 from collections import namedtuple
 
+# package arguments to a 'reduce' action
 
 ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
+
+# How many rows koala accumulates before emitting a DataFrame from its IO
+# source. Smaller batches cap the resident memory of an operator (esp. the
+# list-gathering in inner_join) at the cost of more, smaller DataFrames.
+DEFAULT_BATCH_SIZE = 100_000
 
 # aggregator -> (fn over a stream of string values, output dtype).
 # Each aggregator owns its own parsing so `list` keeps whole strings intact
 # (list("42") would split into ['4','2'] -- do the parse per-aggregator).
+
 AGGREGATORS = {
     len:  (lambda vs: sum(1 for _ in vs),        pl.Int64),
     sum:  (lambda vs: sum(float(v) for v in vs), pl.Float64),
     list: (lambda vs: list(vs),                  pl.List(pl.String)),
 }
+
+
+class KoalaFrame:
+
+    def __init__(self, ldf: pl.LazyFrame):
+        self.ldf = ldf
+
+    def group_by_key(self, key_col: str, reducer: ReduceSpec,
+                     batch_size: int = DEFAULT_BATCH_SIZE) -> KoalaFrame:
+        return KoalaFrame(group_by_key(self.ldf, key_col, reducer, batch_size))
+
+    def inner_join(self, right_kf: KoalaFrame, on: str,
+                   batch_size: int = DEFAULT_BATCH_SIZE) -> KoalaFrame:
+        return KoalaFrame(inner_join(self.ldf, right_kf.ldf, on, batch_size))
+
+    def unique(self) -> KoalaFrame:
+        return KoalaFrame(unique(self.ldf))
+
+    def __getattr__(self, name):
+        """Delegate anything not defined here to the wrapped LazyFrame.
+
+        A method returning a LazyFrame is re-wrapped so chains stay in
+        KoalaFrame-land; terminal methods (collect/sink_csv -> DataFrame/None)
+        and plain attributes (columns, schema, ...) pass through unwrapped.
+        KoalaFrame arguments are unwrapped to their ldf automatically.
+        """
+        if name == 'ldf':                       # not set yet (e.g. during unpickle)
+            raise AttributeError(name)          # -> avoids infinite recursion
+        attr = getattr(self.ldf, name)          # AttributeError if ldf lacks it too
+        if not callable(attr):
+            return attr
+
+        def wrapper(*args, **kwargs):
+            args = [a.ldf if isinstance(a, KoalaFrame) else a for a in args]
+            kwargs = {k: v.ldf if isinstance(v, KoalaFrame) else v
+                      for k, v in kwargs.items()}
+            result = attr(*args, **kwargs)
+            return KoalaFrame(result) if isinstance(result, pl.LazyFrame) else result
+
+        return wrapper
+
+#
+# External API as LazyFrame functions
+#
+
+def group_by_key(ldf: pl.LazyFrame, key_col: str, reducer: ReduceSpec,
+                 batch_size: int = DEFAULT_BATCH_SIZE) -> pl.LazyFrame:
+    """Memory-efficient group-by-then-reduce.
+
+        group_by_key(edges, 'src', reduce('dst', to='n_outlinks', via=len))
+    """
+    agg_fn, output_type = AGGREGATORS[reducer.aggregator]
+    schema = {key_col: pl.String, reducer.output_col: output_type}
+    return _streaming_source(
+        schema,
+        sink_sort=lambda: _sink_sorted(ldf, [key_col, reducer.input_col]),
+        iter_records=lambda path: _reduced_values(path, agg_fn),
+        to_row=lambda kv: {key_col: kv[0], reducer.output_col: kv[1]},
+        batch_size=batch_size,
+    )
+
+
+def inner_join(left: pl.LazyFrame, right: pl.LazyFrame, on: str,
+               batch_size: int = DEFAULT_BATCH_SIZE) -> pl.LazyFrame:
+    """Inner join, built on ONE group_by_key call.
+
+    The map-reduce insight: a join is a group-by on the join key where, instead
+    of summing, each key emits the cross-product of its left rows and its right
+    rows. So we
+
+      1. pack each side's row as JSON, prefixed with a side tag 'L'/'R', keyed
+         by the join column,
+      2. group_by_key(..., via=list) -- ONE call -- to gather both sides of a
+         key into a single list,
+      3. split that list back into a left-list and a right-list (by the tag),
+      4. keep only keys present on BOTH sides (the inner-join gate),
+      5. cross-product via two *sequential* explodes (a single parallel
+         explode would only zip, and errors on many-to-one), then json_decode.
+
+    Only left carries the join key, so unnest doesn't collide. Right's non-key
+    column names are assumed distinct from left's (add a suffix rule to
+    generalize).
+    """
+    lschema = left.collect_schema()
+    rschema = right.collect_schema()
+    left_dtype = pl.Struct(lschema)                                   # incl. key
+    right_dtype = pl.Struct({c: t for c, t in rschema.items() if c != on})
+
+    def pack(ldf, side, cols):
+        return ldf.select(
+            pl.col(on).cast(pl.String).alias('_key_'),               # sort/group key
+            (pl.lit(side) + pl.struct(cols).struct.json_encode()).alias('_row_'))
+
+    combined = pl.concat(
+        [pack(left, 'L', list(lschema)),
+         pack(right, 'R', [c for c in rschema if c != on])],
+        how='vertical')
+
+    # the one group_by_key: co-locate both sides of each key into one list
+    grouped = group_by_key(combined, '_key_', reduce('_row_', to='_rows', via=list),
+                           batch_size=batch_size)
+
+    def _side(tag):     # elements of _rows starting with tag, with the tag sliced off
+        return pl.col('_rows').list.eval(
+            pl.element().filter(pl.element().str.starts_with(tag)).str.slice(1))
+
+    return (
+        grouped
+        .with_columns(_L=_side('L'), _R=_side('R'))
+        .filter((pl.col('_L').list.len() > 0) & (pl.col('_R').list.len() > 0))  # inner gate
+        .explode('_L').explode('_R')                                 # sequential => cross-product
+        .with_columns(pl.col('_L').str.json_decode(left_dtype),
+                      pl.col('_R').str.json_decode(right_dtype))
+        .drop('_key_', '_rows')                                      # drop group_by_key scaffolding
+        .unnest('_L').unnest('_R')
+    )
+
+
+def unique(ldf: pl.LazyFrame) -> pl.LazyFrame:
+    """Drop duplicate rows, memory-efficiently, as a thin wrapper over `sort -u`.
+
+    Pack each whole row as a single JSON column, external-sort with `sort -u`
+    (so identical rows -- identical JSON -- collapse), then stream the survivors
+    back, parsing each JSON line into a row. Same sink -> sort -> stream skeleton
+    as group_by_key; the reduce is just "keep one row per identical line".
+
+    Like group_by_key, the sink+sort is deferred to the first collect().
+    """
+    schema = ldf.collect_schema()
+    packed = ldf.select(pl.struct(pl.all()).struct.json_encode().alias('_row_'))
+    return _streaming_source(
+        schema,
+        sink_sort=lambda: _sink_sorted(packed, ['_row_'], dedup=True),
+        iter_records=_iter_lines,
+        to_row=json.loads,          # each surviving JSON line -> a row dict
+    )
+
+
 
 
 def reduce(input_col: str, to: str | None = None, via: Callable = list) -> ReduceSpec:
@@ -117,8 +265,8 @@ def _sink_sorted(ldf: pl.LazyFrame, cols: list[str], dedup: bool = False) -> str
 def _reduced_values(filepath, agg_fn):
     """Stream (key, aggregate) pairs from a file sorted by key.
 
-    Because the file is sorted, equal keys are contiguous, so itertools.groupby
-    collapses each run in a single streaming pass -- no pushback needed.
+    Because the file is sorted, equal keys are contiguous, so can use
+    itertools.groupby to collapse each run to a single iterator
     """
     with open(filepath) as f:
         rows = (line.rstrip('\n').split('\t', 1) for line in f)
@@ -133,7 +281,7 @@ def _iter_lines(filepath):
             yield line.rstrip('\n')
 
 
-def _streaming_source(schema, sink_sort, iter_records, to_row, batch_size=100_000):
+def _streaming_source(schema, sink_sort, iter_records, to_row, batch_size=DEFAULT_BATCH_SIZE):
     """The shared sink -> sort -> stream skeleton for every koala operator.
 
     Builds a lazy IO source that, on its first execution,
@@ -159,7 +307,10 @@ def _streaming_source(schema, sink_sort, iter_records, to_row, batch_size=100_00
                 df = df.filter(predicate)
             return df
 
-        size = size or batch_size
+        # Our configured batch_size controls koala's own batching; the engine's
+        # `size` hint is only a fallback (the engine passes 100k by default,
+        # which would otherwise override a smaller caller-chosen batch_size).
+        size = batch_size or size
         batch = []
         for rec in iter_records(state['sorted_path']):
             batch.append(to_row(rec))
@@ -176,96 +327,9 @@ def _streaming_source(schema, sink_sort, iter_records, to_row, batch_size=100_00
     return register_io_source(batches, schema=schema)
 
 
-def group_by_key(ldf: pl.LazyFrame, key_col: str, reducer: ReduceSpec) -> pl.LazyFrame:
-    """Memory-efficient group-by-then-reduce.
-
-        group_by_key(edges, 'src', reduce('dst', to='n_outlinks', via=len))
-    """
-    agg_fn, output_type = AGGREGATORS[reducer.aggregator]
-    schema = {key_col: pl.String, reducer.output_col: output_type}
-    return _streaming_source(
-        schema,
-        sink_sort=lambda: _sink_sorted(ldf, [key_col, reducer.input_col]),
-        iter_records=lambda path: _reduced_values(path, agg_fn),
-        to_row=lambda kv: {key_col: kv[0], reducer.output_col: kv[1]},
-    )
-
-
-def inner_join(left: pl.LazyFrame, right: pl.LazyFrame, on: str) -> pl.LazyFrame:
-    """Inner join, built on ONE group_by_key call.
-
-    The map-reduce insight: a join is a group-by on the join key where, instead
-    of summing, each key emits the cross-product of its left rows and its right
-    rows. So we
-
-      1. pack each side's row as JSON, prefixed with a side tag 'L'/'R', keyed
-         by the join column,
-      2. group_by_key(..., via=list) -- ONE call -- to gather both sides of a
-         key into a single list,
-      3. split that list back into a left-list and a right-list (by the tag),
-      4. keep only keys present on BOTH sides (the inner-join gate),
-      5. cross-product via two *sequential* explodes (a single parallel
-         explode would only zip, and errors on many-to-one), then json_decode.
-
-    Only left carries the join key, so unnest doesn't collide. Right's non-key
-    column names are assumed distinct from left's (add a suffix rule to
-    generalize).
-    """
-    lschema = left.collect_schema()
-    rschema = right.collect_schema()
-    left_dtype = pl.Struct(lschema)                                   # incl. key
-    right_dtype = pl.Struct({c: t for c, t in rschema.items() if c != on})
-
-    def pack(ldf, side, cols):
-        return ldf.select(
-            pl.col(on).cast(pl.String).alias('_key_'),               # sort/group key
-            (pl.lit(side) + pl.struct(cols).struct.json_encode()).alias('_row_'))
-
-    combined = pl.concat(
-        [pack(left, 'L', list(lschema)),
-         pack(right, 'R', [c for c in rschema if c != on])],
-        how='vertical')
-
-    # the one group_by_key: co-locate both sides of each key into one list
-    grouped = group_by_key(combined, '_key_', reduce('_row_', to='_rows', via=list))
-
-    def _side(tag):     # elements of _rows starting with tag, with the tag sliced off
-        return pl.col('_rows').list.eval(
-            pl.element().filter(pl.element().str.starts_with(tag)).str.slice(1))
-
-    return (
-        grouped
-        .with_columns(_L=_side('L'), _R=_side('R'))
-        .filter((pl.col('_L').list.len() > 0) & (pl.col('_R').list.len() > 0))  # inner gate
-        .explode('_L').explode('_R')                                 # sequential => cross-product
-        .with_columns(pl.col('_L').str.json_decode(left_dtype),
-                      pl.col('_R').str.json_decode(right_dtype))
-        .drop('_key_', '_rows')                                      # drop group_by_key scaffolding
-        .unnest('_L').unnest('_R')
-    )
-
-
-def unique(ldf: pl.LazyFrame) -> pl.LazyFrame:
-    """Drop duplicate rows, memory-efficiently, as a thin wrapper over `sort -u`.
-
-    Pack each whole row as a single JSON column, external-sort with `sort -u`
-    (so identical rows -- identical JSON -- collapse), then stream the survivors
-    back, parsing each JSON line into a row. Same sink -> sort -> stream skeleton
-    as group_by_key; the reduce is just "keep one row per identical line".
-
-    Like group_by_key, the sink+sort is deferred to the first collect().
-    """
-    schema = ldf.collect_schema()
-    packed = ldf.select(pl.struct(pl.all()).struct.json_encode().alias('_row_'))
-    return _streaming_source(
-        schema,
-        sink_sort=lambda: _sink_sorted(packed, ['_row_'], dedup=True),
-        iter_records=_iter_lines,
-        to_row=json.loads,          # each surviving JSON line -> a row dict
-    )
-
-
 if __name__ == '__main__':
+    print('RUNNING SMOKE TESTS')
+
     edges = (
         pl.scan_lines('../data/citeseer-graph.txt')
         .with_columns(edge=pl.col('line').str.extract_groups(r'(\w+)\s+(\w+)'))

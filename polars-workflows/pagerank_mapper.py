@@ -45,6 +45,17 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
         .unique()
         .collect(engine='streaming')
     )
+    # NOTE ON DANGLING NODES: score_dict is seeded from ALL nodes (src union
+    # dst). A node with no indegree is never a 'dst', so it is never updated in
+    # the loop below and keeps emitting messages from its stale 1.0 score every
+    # iteration. This differs from the join-based pagerank.py / pagerank_kl.py,
+    # where such a node is dropped after iteration 1 (its scores row disappears,
+    # and the inner join on 'src' then drops its out-edges) so it stops
+    # contributing. The two conventions therefore give different scores whenever
+    # the "every node has indegree >= 1" assumption is violated -- e.g. the
+    # citeseer graph has 11 no-indegree nodes, so this mapper's top scores run
+    # slightly higher. On a graph with a self-loop per node (indegree >= 1 for
+    # all, as in demo_memory.py) all three implementations agree exactly.
     score_dict = {node:1.0 for node in nodes['node']}
 
     # also in memory: number of outlinks from the src 
@@ -66,7 +77,6 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
     def makemapper(score_dict, outlink_dict):
         def delta(edge) -> float:
             src = edge['src']
-            dst = edge['src']
             n_outs = outlink_dict[src]
             src_score = score_dict[src]
             return ((1.0 - reset) * src_score  / n_outs)
@@ -90,7 +100,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
         # part of the src's score that will be sent to the dst via a 'hop'
         pr_messages = (
             edges
-            # apply mapper that uses in-memory dicts
+            # apply mapper that uses in-memory dicts - a 'map-side join'
             .with_columns(pl.col('edge').map_elements(delta_fn, return_dtype=pl.Float64).alias('delta'))
             # structure dataframe for the reduce stage below
             .with_columns(dst=pl.col('edge').struct['dst'])

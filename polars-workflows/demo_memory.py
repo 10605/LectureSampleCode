@@ -30,6 +30,10 @@ Usage:
     # rule out common-subplan-elimination caching (see MEMORY_DIAGNOSIS.md):
     python demo_memory.py --no-cse
 
+    # compare implementations in one table (default runs both):
+    python demo_memory.py --engines polars koala
+    python demo_memory.py --engines koala          # koala only
+
     # A single run (this is what the table driver spawns internally):
     python demo_memory.py --single --mode lazy --graph /tmp/g.txt --iterations 10
 """
@@ -43,12 +47,28 @@ import time
 
 import polars as pl
 
+import koala as kl
 import pagerank
+import pagerank_kl
+
+# The two pagerank implementations, keyed by --engine. Both expose the same
+# pagerank(edge_lines, num_iterations=, cse=) signature; koala additionally
+# wants its edge_lines wrapped as a KoalaFrame (its heavy group_by/join spill to
+# disk instead of buffering in RAM -- see koala.py / MEMORY_DIAGNOSIS.md).
+ENGINES = {
+    'polars': (pagerank,    lambda lines: lines),
+    'koala':  (pagerank_kl, kl.KoalaFrame),
+}
 
 
-def peak_rss_mb():
-    """Peak resident set size of THIS process, in MiB."""
-    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+def peak_rss_mb(who=resource.RUSAGE_SELF):
+    """Peak resident set size, in MiB.
+
+    who=RUSAGE_SELF  -> this Python process only.
+    who=RUSAGE_CHILDREN -> largest waited-for child (e.g. koala's external
+        `sort`); this is invisible to RUSAGE_SELF, so measure it separately.
+    """
+    r = resource.getrusage(who).ru_maxrss
     # macOS reports ru_maxrss in bytes; Linux reports kilobytes.
     return r / 1024**2 if sys.platform == 'darwin' else r / 1024
 
@@ -83,15 +103,20 @@ def make_lines(path, mode):
     return scan
 
 
-def run_single(mode, path, iterations, cse=True):
+def run_single(mode, path, iterations, engine='polars', cse=True, batch_size=None):
     """Run pagerank once and report this process's peak RSS."""
-    pagerank.VERBOSE = 0                              # silence show() output
-    lines = make_lines(path, mode)
+    module, wrap = ENGINES[engine]
+    module.VERBOSE = 0                               # silence show() output
+    lines = wrap(make_lines(path, mode))
+    kwargs = dict(num_iterations=iterations, cse=cse)
+    if engine == 'koala' and batch_size is not None:  # koala-only knob
+        kwargs['batch_size'] = batch_size
     start = time.time()
-    pagerank.pagerank(lines, num_iterations=iterations, cse=cse)
+    module.pagerank(lines, **kwargs)
     elapsed = time.time() - start
     # markers parsed by the table driver
     print(f'PEAK_RSS_MB {peak_rss_mb():.1f}')
+    print(f'PEAK_CHILD_RSS_MB {peak_rss_mb(resource.RUSAGE_CHILDREN):.1f}')
     print(f'ELAPSED_S {elapsed:.2f}')
 
 
@@ -102,38 +127,81 @@ def _parse_marker(text, marker):
     return float('nan')
 
 
-def run_matrix(nodes, edge_sizes, iterations, cse=True):
-    """Spawn a fresh subprocess per (edges, mode) and tabulate peak RSS."""
+_ENGINE_CODE = {'polars': 'pl', 'koala': 'ko'}
+
+
+def run_matrix(nodes, edge_sizes, iterations, engines=('polars',), cse=True,
+               batch_size=None):
+    """Spawn a fresh subprocess per (engine, edges, mode) and tabulate peak RSS.
+
+    Columns are one per engine x mode; rows are edge counts. lazy RSS should
+    stay ~flat as edges grow while eager climbs; koala spills its group_by/join
+    to disk so it stays bounded too, at a fixed per-iteration overhead.
+    """
+    configs = [(e, m) for e in engines for m in ('lazy', 'eager')]
+    total_runs = len(edge_sizes) * len(configs)
+    done = 0
+
     rows = []
-    for m in edge_sizes:
-        path = f'/tmp/prdemo_{nodes}_{m}.txt'
-        total_lines = generate_graph(path, nodes, m)
-        row = {'lines': total_lines}
-        for mode in ('lazy', 'eager'):
+    for n_edges in edge_sizes:
+        path = f'/tmp/prdemo_{nodes}_{n_edges}.txt'
+        total_lines = generate_graph(path, nodes, n_edges)
+        row = {'lines': total_lines, 'rss': {}, 'child': {}, 's': {}}
+        for engine, mode in configs:
+            done += 1
+            print(f'[{done}/{total_runs}] {total_lines:,} lines  {engine}/{mode} ...',
+                  end='', flush=True, file=sys.stderr)
             cmd = [sys.executable, __file__, '--single',
-                   '--mode', mode, '--graph', path,
+                   '--mode', mode, '--engine', engine, '--graph', path,
                    '--iterations', str(iterations)]
             if not cse:
                 cmd.append('--no-cse')
+            if batch_size is not None:
+                cmd += ['--batch_size', str(batch_size)]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
+                print(' FAILED', file=sys.stderr)
                 sys.stderr.write(proc.stderr)
                 proc.check_returncode()
-            row[f'{mode}_rss'] = _parse_marker(proc.stdout, 'PEAK_RSS_MB')
-            row[f'{mode}_s'] = _parse_marker(proc.stdout, 'ELAPSED_S')
+            row['rss'][(engine, mode)] = _parse_marker(proc.stdout, 'PEAK_RSS_MB')
+            row['child'][(engine, mode)] = _parse_marker(proc.stdout, 'PEAK_CHILD_RSS_MB')
+            row['s'][(engine, mode)] = _parse_marker(proc.stdout, 'ELAPSED_S')
+            print(f' {row["rss"][(engine, mode)]:.0f} MB, '
+                  f'{row["s"][(engine, mode)]:.1f} s', file=sys.stderr)
         rows.append(row)
         os.remove(path)
 
+    _print_matrix(rows, configs, engines, nodes, iterations, cse)
+
+
+def _print_matrix(rows, configs, engines, nodes, iterations, cse):
+    """Render the sweep as side-by-side groups: peak RSS, child RSS, elapsed.
+
+    child RSS is the largest external `sort` koala spawns (invisible to the
+    process's own RSS); it stays ~0 for polars, which spawns no such helper.
+    """
+    labels = [f'{_ENGINE_CODE.get(e, e[:2])}-{m}' for e, m in configs]
+    W, L, gap = 10, 14, '   '                    # config col / lines col / group gap
+    cols = ''.join(f'{lab:>{W}}' for lab in labels)
+
+    def group(key):                              # one group's values for a row
+        return lambda r: ''.join(f'{r[key][c]:>{W}.1f}' for c in configs)
+    groups = [('self RSS (MB)', group('rss')),
+              ('child RSS (MB)', group('child')),
+              ('elapsed (s)', group('s'))]
+
     print()
-    print(f'Fixed nodes = {nodes:,}   iterations = {iterations}   CSE = {"on" if cse else "off"}')
-    print('(peak RSS should stay ~flat for lazy as edges grow; eager climbs)')
+    print(f'Engines = {", ".join(engines)}   Fixed nodes = {nodes:,}   '
+          f'iterations = {iterations}   CSE = {"on" if cse else "off"}')
+    print('(self RSS = this process; child RSS = koala\'s external sort, ~0 for '
+          'polars. lazy self RSS ~flat as edges grow; eager climbs.)')
     print()
-    hdr = f'{"total lines":>14}  {"lazy RSS MB":>12}  {"eager RSS MB":>13}  {"lazy s":>7}  {"eager s":>8}'
+    print(f'{"":>{L}}' + ''.join(f'{gap}{title:^{len(cols)}}' for title, _ in groups))
+    hdr = f'{"total lines":>{L}}' + ''.join(f'{gap}{cols}' for _ in groups)
     print(hdr)
     print('-' * len(hdr))
     for r in rows:
-        print(f'{r["lines"]:>14,}  {r["lazy_rss"]:>12.1f}  {r["eager_rss"]:>13.1f}'
-              f'  {r["lazy_s"]:>7.1f}  {r["eager_s"]:>8.1f}')
+        print(f'{r["lines"]:>{L},}' + ''.join(f'{gap}{fn(r)}' for _, fn in groups))
 
 
 if __name__ == '__main__':
@@ -143,20 +211,35 @@ if __name__ == '__main__':
                         help='run one configuration and print its peak RSS')
     parser.add_argument('--mode', choices=('lazy', 'eager'), default='lazy',
                         help='how to feed edges to pagerank (single-run mode)')
+    parser.add_argument('--engine', choices=tuple(ENGINES), default='polars',
+                        help='which pagerank implementation to run in single-run '
+                             'mode: polars (pagerank.py) or koala (pagerank_kl.py)')
+    parser.add_argument('--engines', nargs='+', choices=tuple(ENGINES),
+                        default=list(ENGINES),
+                        help='implementations to compare in the table '
+                             '(default: all)')
     parser.add_argument('--graph', help='edge-list file to use (single-run mode)')
     parser.add_argument('--nodes', type=int, default=20000,
                         help='fixed node count for the comparison table')
     parser.add_argument('--edges', type=int, nargs='+',
-                        default=[200_000, 1_000_000, 4_000_000],
+                        default=[250_000, 1_000_000, 4_000_000],
                         help='edge counts to sweep for the comparison table')
     parser.add_argument('--iterations', type=int, default=10,
                         help='pagerank iterations per run')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='koala-only: rows per DataFrame emitted by '
+                             "inner_join's IO source (default: koala's "
+                             f'{kl.DEFAULT_BATCH_SIZE:,}). Smaller caps memory.')
     parser.add_argument('--no-cse', action='store_true',
                         help='disable common-subplan elimination in pagerank '
                              '(memory experiment; see MEMORY_DIAGNOSIS.md)')
     args = parser.parse_args()
 
     if args.single:
-        run_single(args.mode, args.graph, args.iterations, cse=not args.no_cse)
+        run_single(args.mode, args.graph, args.iterations,
+                   engine=args.engine, cse=not args.no_cse,
+                   batch_size=args.batch_size)
     else:
-        run_matrix(args.nodes, args.edges, args.iterations, cse=not args.no_cse)
+        run_matrix(args.nodes, args.edges, args.iterations,
+                   engines=args.engines, cse=not args.no_cse,
+                   batch_size=args.batch_size)
