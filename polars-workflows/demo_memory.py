@@ -60,6 +60,11 @@ ENGINES = {
     'koala':  (pagerank_kl, kl.KoalaFrame),
 }
 
+# A table config is an engine paired with an edge-feeding mode. The table sweeps
+# a chosen subset of these (see --configs) across a range of edge counts.
+MODES = ('lazy', 'eager')
+ALL_CONFIGS = [f'{e}-{m}' for e in ENGINES for m in MODES]
+
 
 def peak_rss_mb(who=resource.RUSAGE_SELF):
     """Peak resident set size, in MiB.
@@ -127,18 +132,14 @@ def _parse_marker(text, marker):
     return float('nan')
 
 
-_ENGINE_CODE = {'polars': 'pl', 'koala': 'ko'}
+def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None):
+    """Spawn a fresh subprocess per (config, edges) and tabulate peak RSS.
 
-
-def run_matrix(nodes, edge_sizes, iterations, engines=('polars',), cse=True,
-               batch_size=None):
-    """Spawn a fresh subprocess per (engine, edges, mode) and tabulate peak RSS.
-
-    Columns are one per engine x mode; rows are edge counts. lazy RSS should
-    stay ~flat as edges grow while eager climbs; koala spills its group_by/join
-    to disk so it stays bounded too, at a fixed per-iteration overhead.
+    `configs` is a list of (engine, mode) pairs. The printed table puts one
+    config per row and one edge count per column. lazy self RSS should stay
+    ~flat as edges grow while eager climbs; koala spills its group_by/join to
+    disk so it stays bounded too, at a fixed per-iteration overhead.
     """
-    configs = [(e, m) for e in engines for m in ('lazy', 'eager')]
     total_runs = len(edge_sizes) * len(configs)
     done = 0
 
@@ -171,37 +172,38 @@ def run_matrix(nodes, edge_sizes, iterations, engines=('polars',), cse=True,
         rows.append(row)
         os.remove(path)
 
-    _print_matrix(rows, configs, engines, nodes, iterations, cse)
+    _print_matrix(rows, configs, nodes, iterations, cse)
 
 
-def _print_matrix(rows, configs, engines, nodes, iterations, cse):
-    """Render the sweep as side-by-side groups: peak RSS, child RSS, elapsed.
+def _print_matrix(rows, configs, nodes, iterations, cse):
+    """Render one sub-table per metric: config per row, edge count per column.
 
     child RSS is the largest external `sort` koala spawns (invisible to the
     process's own RSS); it stays ~0 for polars, which spawns no such helper.
     """
-    labels = [f'{_ENGINE_CODE.get(e, e[:2])}-{m}' for e, m in configs]
-    W, L, gap = 10, 14, '   '                    # config col / lines col / group gap
-    cols = ''.join(f'{lab:>{W}}' for lab in labels)
+    label = lambda c: f'{c[0]}-{c[1]}'                        # ('koala','lazy') -> 'koala-lazy'
+    sizes = [r['lines'] for r in rows]
+    metrics = [('self RSS (MB)', 'rss'),
+               ('child RSS (MB)', 'child'),
+               ('elapsed (s)', 's')]
 
-    def group(key):                              # one group's values for a row
-        return lambda r: ''.join(f'{r[key][c]:>{W}.1f}' for c in configs)
-    groups = [('self RSS (MB)', group('rss')),
-              ('child RSS (MB)', group('child')),
-              ('elapsed (s)', group('s'))]
+    name_w = max([len(t) for t, _ in metrics] + [len(label(c)) for c in configs])
+    col_w = max(12, len(f'{max(sizes):,}') + 2)
 
     print()
-    print(f'Engines = {", ".join(engines)}   Fixed nodes = {nodes:,}   '
-          f'iterations = {iterations}   CSE = {"on" if cse else "off"}')
-    print('(self RSS = this process; child RSS = koala\'s external sort, ~0 for '
+    print(f'Fixed nodes = {nodes:,}   iterations = {iterations}   '
+          f'CSE = {"on" if cse else "off"}   (columns = total lines)')
+    print("(self RSS = this process; child RSS = koala's external sort, ~0 for "
           'polars. lazy self RSS ~flat as edges grow; eager climbs.)')
-    print()
-    print(f'{"":>{L}}' + ''.join(f'{gap}{title:^{len(cols)}}' for title, _ in groups))
-    hdr = f'{"total lines":>{L}}' + ''.join(f'{gap}{cols}' for _ in groups)
-    print(hdr)
-    print('-' * len(hdr))
-    for r in rows:
-        print(f'{r["lines"]:>{L},}' + ''.join(f'{gap}{fn(r)}' for _, fn in groups))
+
+    for title, key in metrics:
+        print()
+        hdr = f'{title:<{name_w}}' + ''.join(f'{s:>{col_w},}' for s in sizes)
+        print(hdr)
+        print('-' * len(hdr))
+        for c in configs:
+            vals = ''.join(f'{r[key][c]:>{col_w}.1f}' for r in rows)
+            print(f'{label(c):<{name_w}}{vals}')
 
 
 if __name__ == '__main__':
@@ -214,9 +216,10 @@ if __name__ == '__main__':
     parser.add_argument('--engine', choices=tuple(ENGINES), default='polars',
                         help='which pagerank implementation to run in single-run '
                              'mode: polars (pagerank.py) or koala (pagerank_kl.py)')
-    parser.add_argument('--engines', nargs='+', choices=tuple(ENGINES),
-                        default=list(ENGINES),
-                        help='implementations to compare in the table '
+    parser.add_argument('--configs', nargs='+', choices=ALL_CONFIGS,
+                        default=ALL_CONFIGS, metavar='ENGINE-MODE',
+                        help='engine-mode configs to compare in the table, a '
+                             'subset of {' + ', '.join(ALL_CONFIGS) + '} '
                              '(default: all)')
     parser.add_argument('--graph', help='edge-list file to use (single-run mode)')
     parser.add_argument('--nodes', type=int, default=20000,
@@ -240,6 +243,7 @@ if __name__ == '__main__':
                    engine=args.engine, cse=not args.no_cse,
                    batch_size=args.batch_size)
     else:
+        configs = [tuple(c.split('-')) for c in args.configs]
         run_matrix(args.nodes, args.edges, args.iterations,
-                   engines=args.engines, cse=not args.no_cse,
+                   configs=configs, cse=not args.no_cse,
                    batch_size=args.batch_size)

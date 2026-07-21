@@ -53,6 +53,11 @@ ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
 # list-gathering in inner_join) at the cost of more, smaller DataFrames.
 DEFAULT_BATCH_SIZE = 100_000
 
+# Cap the external `sort`'s in-memory buffer (it spills the rest to temp files).
+# Keeps the sort subprocess's RSS bounded regardless of input size -- the whole
+# point of using an external sort. Passed as `sort -S`.
+SORT_BUFFER_SIZE = '64M'
+
 # aggregator -> (fn over a stream of string values, output dtype).
 # Each aggregator owns its own parsing so `list` keeps whole strings intact
 # (list("42") would split into ['4','2'] -- do the parse per-aggregator).
@@ -253,7 +258,9 @@ def _sink_sorted(ldf: pl.LazyFrame, cols: list[str], dedup: bool = False) -> str
     # a key); -t '\t' so the field separator is the tab; LC_ALL=C for fast,
     # deterministic byte ordering (grouping only needs contiguity, not a
     # numeric/locale collation).
-    cmd = ['sort', '-t', '\t', '-k1,1', raw, '-o', srt]
+    # -S bounds the sort's memory buffer (rest spills to temp files) so the sort
+    # subprocess RSS stays flat as input grows.
+    cmd = ['sort', '-S', SORT_BUFFER_SIZE, '-t', '\t', '-k1,1', raw, '-o', srt]
     if dedup:
         cmd.insert(1, '-u')
     subprocess.run(cmd, env={**os.environ, 'LC_ALL': 'C'}, check=True)
