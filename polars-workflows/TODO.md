@@ -1,21 +1,36 @@
 # STATUS
 
-Engines = polars, koala   Fixed nodes = 20,000   iterations = 2   CSE = on
-(self RSS = this process; child RSS = koala's external sort, ~0 for polars. lazy self RSS ~flat as edges grow; eager climbs.)
+polars seems to really like using memory.  I should try on a smaller
+machine to see what it does.  and maybe write a 'real' merge sort
 
-                              self RSS (MB)                              child RSS (MB)                              elapsed (s)               
-   total lines      pl-lazy  pl-eager   ko-lazy  ko-eager      pl-lazy  pl-eager   ko-lazy  ko-eager      pl-lazy  pl-eager   ko-lazy  ko-eager
------------------------------------------------------------------------------------------------------------------------------------------------
-     2,020,000        487.4     539.1     550.6     576.3          0.0       0.0     257.4     253.4          0.2       0.1       7.5       7.8
-     4,020,000        852.5     838.4     849.2     872.1          0.0       0.0     501.2     502.4          0.3       0.2      14.6      14.5
+koala now uses the streaming merge_join (no JSON) in the pagerank loop; matches
+pagerank.py exactly. Per-iteration join+sum dropped ~4.9x vs inner_join (see
+
+Fixed nodes = 20,000   iterations = 2   CSE = on   (columns = total lines)
+
+self RSS (MB)    1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
+--------------------------------------------------------------------------------------
+koala-lazy           305.7       385.1       590.5       951.5      1454.5      2151.3
+polars-lazy          379.1       494.8       781.4      1200.0      1945.7      3120.1
+															                          
+child RSS (MB)   1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
+--------------------------------------------------------------------------------------
+koala-lazy           118.0       137.5       168.3       203.0       314.2       515.0
+polars-lazy            0.0         0.0         0.0         0.0         0.0         0.0
+															                          
+elapsed (s)      1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
+--------------------------------------------------------------------------------------
+koala-lazy             4.5         9.8        19.6        38.9       100.0       203.2
+polars-lazy            0.1         0.1         0.3         0.5         1.0         1.7
+
 
 # TODO
 
-demo_memory.pl
- * drilldown and see where the memory use is happening in koala
+ * [done] drilldown where the memory goes in koala -> inner_join list-gather (#4)
+ * [done] convert smoke tests to unit tests -> test_koala.py (pytest, 10 tests)
+ * [done] optimized inner_join with key-value pairs (no packing) -> merge_join
+   * sort left, right together with key, lval, rval (tagged L/R)
+   * per-key combine in the streaming layer; inner gate = both sides present
+ * write inner_join(..., how=) to switch implementations
  * write mapside joins for polar/koala
    * as a koala method, not special code like in pagerank_mapper
- * write optimized inner_join with key-value pairs (no packing)
-   * sort left, right together with key, lval, rval (one val is always null)
-   * groupby with a special aggregator that (combines lval, rval in a row)
-   * filter by lval != None and rval != None
