@@ -8,7 +8,8 @@ input proportional to the number of rows (see MEMORY_DIAGNOSIS.md). Instead
   1. sink the (key, value) columns to a TSV on disk,
 
   2. sort that file with something that is memory-efficient: unix
-     `sort` (external, spills to disk, with env var LC_ALL=C)
+     `sort` (external, spills to disk, with env var LC_ALL=C). Its memory is
+     bounded but not flat -- see the SORT_BUFFER_SIZE note.
 
   3. stream through the sorted file collapsing contiguous runs of equal keys
      into (key, aggregate) rows, and feed those back into polars via an IO
@@ -53,9 +54,25 @@ ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
 # list-gathering in inner_join) at the cost of more, smaller DataFrames.
 DEFAULT_BATCH_SIZE = 100_000
 
-# Cap the external `sort`'s in-memory buffer (it spills the rest to temp files).
-# Keeps the sort subprocess's RSS bounded regardless of input size -- the whole
-# point of using an external sort. Passed as `sort -S`.
+# Cap the external `sort`'s in-memory buffer with `sort -S`; the rest spills to
+# temp files. This BOUNDS -- but does not pin -- the sort subprocess's RSS.
+# Measured (macOS sort 2.3-Apple, 2M-line TSVs; see TODO.md #4):
+#
+#   * `-S N` sizes the *sort buffer* (one run's worth of data), not total RSS.
+#     Peak RSS runs ~2x N:  -S 16M -> ~34 MB,  -S 64M -> ~120 MB,
+#     -S 256M -> ~uncapped. The overhead is sort's per-line pointer/record
+#     arrays plus read/write I/O buffers, none of which `-S` counts.
+#
+#   * At FIXED -S, RSS still creeps up with input (-S 64M: 114 MB @1M lines ->
+#     173 MB @8M lines). Cause: an external sort writes ~input/N sorted runs to
+#     temp files, then does ONE n-way merge holding a read buffer + heap slot
+#     per run -- so more input -> more runs -> more merge memory.
+#
+# Ideally sort would instead cascade log2(input/N) *binary* merges: only two
+# run-buffers live at once, so merge memory is O(1) in the number of runs and
+# stays flat regardless of input. Unix `sort` does a single n-way merge, so we
+# eat the slow creep. It's still bounded and small next to koala's own process
+# RSS (the real memory sink -- see the inner_join list-gather).
 SORT_BUFFER_SIZE = '64M'
 
 # aggregator -> (fn over a stream of string values, output dtype).
@@ -258,8 +275,9 @@ def _sink_sorted(ldf: pl.LazyFrame, cols: list[str], dedup: bool = False) -> str
     # a key); -t '\t' so the field separator is the tab; LC_ALL=C for fast,
     # deterministic byte ordering (grouping only needs contiguity, not a
     # numeric/locale collation).
-    # -S bounds the sort's memory buffer (rest spills to temp files) so the sort
-    # subprocess RSS stays flat as input grows.
+    # -S bounds the sort's memory buffer, rest spills to temp files (see the
+    # SORT_BUFFER_SIZE note for why peak RSS is ~2x that and still creeps up
+    # with input -- unix sort's single n-way merge, not a binary-merge cascade).
     cmd = ['sort', '-S', SORT_BUFFER_SIZE, '-t', '\t', '-k1,1', raw, '-o', srt]
     if dedup:
         cmd.insert(1, '-u')
