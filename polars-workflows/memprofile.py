@@ -72,11 +72,15 @@ def op_gbk_sum(edges, batch_size):                 # sum reduce -> O(nodes)
     w = edges.with_columns(w=(pl.col('src').str.len_chars() % 5 + 1).cast(pl.Float64))
     kl.group_by_key(w, 'dst', kl.reduce('w', to='incoming', via=sum)).sink_csv(DEVNULL)
 
-def op_join(edges, batch_size):                    # inner_join, streamed out
+def op_join(edges, batch_size):                    # inner_join (list-gather), streamed out
     n_out = kl.group_by_key(edges, 'src', kl.reduce('dst', to='n_outlinks', via=len))
     kl.inner_join(edges, n_out, on='src', batch_size=batch_size).sink_csv(DEVNULL)
 
-def op_iter(edges, batch_size):                    # join + sum per dst -> O(nodes)
+def op_merge(edges, batch_size):                   # merge_join (streaming), streamed out
+    n_out = kl.group_by_key(edges, 'src', kl.reduce('dst', to='n_outlinks', via=len))
+    kl.merge_join(edges, n_out, on='src', batch_size=batch_size).sink_csv(DEVNULL)
+
+def op_iter(edges, batch_size):                    # inner_join + sum per dst -> O(nodes)
     n_out = kl.group_by_key(edges, 'src', kl.reduce('dst', to='n_outlinks', via=len))
     joined = kl.inner_join(edges, n_out, on='src', batch_size=batch_size)
     msgs = joined.with_columns(delta=(1.0 / pl.col('n_outlinks')).cast(pl.Float64)) \
@@ -84,8 +88,16 @@ def op_iter(edges, batch_size):                    # join + sum per dst -> O(nod
     kl.group_by_key(msgs, 'dst', kl.reduce('delta', to='pr', via=sum)) \
       .collect(engine='streaming')
 
+def op_iter_merge(edges, batch_size):              # merge_join + sum per dst -> O(nodes)
+    n_out = kl.group_by_key(edges, 'src', kl.reduce('dst', to='n_outlinks', via=len))
+    joined = kl.merge_join(edges, n_out, on='src', batch_size=batch_size)   # values are strings
+    msgs = joined.with_columns(delta=(1.0 / pl.col('n_outlinks').cast(pl.Float64))) \
+                 .select('dst', 'delta')
+    kl.group_by_key(msgs, 'dst', kl.reduce('delta', to='pr', via=sum)) \
+      .collect(engine='streaming')
+
 OPS = {'scan': op_scan, 'gbk_len': op_gbk_len, 'gbk_sum': op_gbk_sum,
-       'join': op_join, 'iter': op_iter}
+       'join': op_join, 'merge': op_merge, 'iter': op_iter, 'iter_merge': op_iter_merge}
 
 
 def run_single(op, graph, batch_size):

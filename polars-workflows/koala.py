@@ -101,6 +101,10 @@ class KoalaFrame:
                    batch_size: int = DEFAULT_BATCH_SIZE) -> KoalaFrame:
         return KoalaFrame(inner_join(self.ldf, right_kf.ldf, on, batch_size))
 
+    def merge_join(self, right_kf: KoalaFrame, on: str,
+                   batch_size: int = DEFAULT_BATCH_SIZE) -> KoalaFrame:
+        return KoalaFrame(merge_join(self.ldf, right_kf.ldf, on, batch_size))
+
     def unique(self) -> KoalaFrame:
         return KoalaFrame(unique(self.ldf))
 
@@ -218,6 +222,81 @@ def inner_join(left: pl.LazyFrame, right: pl.LazyFrame, on: str,
         .drop('_key_', '_rows')                                      # drop group_by_key scaffolding
         .unnest('_L').unnest('_R')
     )
+
+
+def merge_join(left: pl.LazyFrame, right: pl.LazyFrame, on: str,
+               batch_size: int = DEFAULT_BATCH_SIZE) -> pl.LazyFrame:
+    """Inner join specialized to single (key, value) frames -- NO JSON packing.
+
+    The memory-frugal alternative to inner_join (see its MEMORY note; TODO.md
+    #6), restricted to the common shape where each side has exactly ONE non-key
+    column. That restriction is what lets us skip the JSON pack/explode: values
+    go through the external sort as RAW strings (tagged 'L'/'R' so the two sides
+    stay distinguishable), the cross-product is done in the Python streaming
+    layer, and the result comes back as STRING columns. The caller casts them
+    back -- vectorized and cheap -- e.g.
+
+        kl.merge_join(edges, n_outlinks, on='src') \\
+          .with_columns(pl.col('n_outlinks').cast(pl.Int64))
+
+    Steps:
+      1. tag each row as (key, <'L'|'R'> + str(value)),
+      2. sink + external-sort by key (both sides interleaved under each key),
+      3. stream key-by-key: split the run by tag into left/right values and, if
+         BOTH sides are present (the inner gate), yield the cross-product,
+      4. emit (key, lval, rval) as strings.
+
+    Memory is O(one key's rows + batch_size): only a SINGLE key's values are
+    resident, output is batched by row. For a many-to-one join (pagerank's
+    edges |><| n_outlinks) the 'one' side is a single value per key, so this is
+    ~O(max out-degree + batch_size) with no per-batch blowup and no per-row JSON.
+
+    Requires exactly one non-key column per side; their names are assumed
+    distinct (as in inner_join). Output columns: [on, left-value, right-value].
+    Note float values round-trip through their polars string repr.
+    """
+    lval = [c for c in left.collect_schema() if c != on]
+    rval = [c for c in right.collect_schema() if c != on]
+    if len(lval) != 1 or len(rval) != 1:
+        raise ValueError('merge_join needs exactly one non-key column per side; '
+                         f'got left={lval}, right={rval} (use inner_join instead)')
+    lcol, rcol = lval[0], rval[0]
+
+    def tagged(frame, valcol, tag):                    # -> (_key_, tag + value)
+        return frame.select(
+            pl.col(on).cast(pl.String).alias('_key_'),
+            (pl.lit(tag) + pl.col(valcol).cast(pl.String)).alias('_tv_'))
+
+    combined = pl.concat([tagged(left, lcol, 'L'), tagged(right, rcol, 'R')],
+                         how='vertical')
+    out_schema = {on: pl.String, lcol: pl.String, rcol: pl.String}
+    return _streaming_source(
+        out_schema,
+        sink_sort=lambda: _sink_sorted(combined, ['_key_', '_tv_']),
+        iter_records=_merge_join_rows,
+        to_row=lambda klr: {on: klr[0], lcol: klr[1], rcol: klr[2]},
+        batch_size=batch_size,
+    )
+
+
+def _merge_join_rows(filepath):
+    """Stream cross-product (key, lval, rval) triples from a file sorted by key.
+
+    Each line is `key <TAB> <'L'|'R'>value`. Equal keys are contiguous (sorted),
+    so groupby collapses a key's run; the tag char splits it into left/right
+    values and, when both sides are present, we emit the cross-product. Only ONE
+    key's values are held at a time.
+    """
+    with open(filepath) as f:
+        rows = (line.rstrip('\n').split('\t', 1) for line in f)
+        for key, grp in groupby(rows, key=lambda r: r[0]):
+            lefts, rights = [], []
+            for _, tv in grp:
+                (lefts if tv[0] == 'L' else rights).append(tv[1:])
+            if lefts and rights:                       # inner gate: both sides
+                for l in lefts:
+                    for r in rights:
+                        yield (key, l, r)
 
 
 def unique(ldf: pl.LazyFrame) -> pl.LazyFrame:
@@ -438,5 +517,21 @@ if __name__ == '__main__':
     # 6. unique: whole-row dedup on a frame with deliberate duplicate rows
     dup = pl.concat([edges, edges.head(100)])          # 100 rows now appear twice
     all_ok &= check('unique / edges+dups', unique(dup), dup.unique())
+
+    # 7. merge_join: same many-to-one join as #4, streaming single-value version.
+    #    Output values are strings -> caller casts the int column back to compare.
+    all_ok &= check(
+        'merge_join / edges+n_outlinks (many-to-one)',
+        merge_join(edges, n_outlinks, on='src').with_columns(pl.col('n_outlinks').cast(pl.Int64)),
+        edges.join(n_outlinks, on='src', how='inner'),
+    )
+
+    # 8. merge_join: the many-to-many + non-matching-key case from #5 (both
+    #    values are ints, so cast both back)
+    all_ok &= check(
+        'merge_join / many-to-many',
+        merge_join(L, R, on='k').with_columns(pl.col('lv').cast(pl.Int64), pl.col('rv').cast(pl.Int64)),
+        L.join(R, on='k', how='inner'),
+    )
 
     print('ALL OK' if all_ok else 'SOME CHECKS FAILED')

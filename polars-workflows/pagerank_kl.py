@@ -23,9 +23,10 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True,
              batch_size=kl.DEFAULT_BATCH_SIZE):
     # cse=False disables common-subplan elimination, which otherwise inserts a
     # CACHE node for the shared `edges` subplan (see MEMORY_DIAGNOSIS.md).
-    # batch_size tunes koala's inner_join batching (rows per emitted DataFrame).
+    # batch_size tunes koala's merge_join batching (rows per emitted DataFrame).
 
-    # construct edges
+    # construct edges (kept as (src, dst) -- single value per key, so the
+    # per-iteration join can use koala's no-JSON merge_join)
     edges = (
         edge_lines
         .with_columns(edge=pl.col('line').str.extract_groups(r'(\w+)\s+(\w+)'))
@@ -34,9 +35,9 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True,
             dst=pl.col('edge').struct['2'])
         .select('src', 'dst')
     )
-    # augment edges with number of outlinks from the src 
-    n_outlinks = edges.group_by_key('src', kl.reduce('dst', to='n_outlinks', via=len))
-    edges = edges.inner_join(n_outlinks, on='src', batch_size=batch_size)
+    # number of outlinks per src, materialized in memory (O(nodes))
+    n_outlinks = edges.group_by_key('src', kl.reduce('dst', to='n_outlinks', via=len)).collect(
+        engine='streaming', optimizations=pl.QueryOptFlags(comm_subplan_elim=cse))
     show('edges', edges)
 
     # initialize a score for each node these are kept in memory - a
@@ -68,16 +69,21 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True,
         print(f'iteration {t + 1:2d} of {num_iterations} time {time.time() - start:.4f}', 
               f'len {num_scores} max {max_score:.2f} min {min_score:.2f} mean {mean_score:.2f}')
 
-        # distribute scores from src to destinations - each msg is the
-        # part of the src's score that will be sent to the dst via a 'hop'.
-        # koala's inner_join keys on a column with the same name on both
-        # sides, so rename node->src and wrap the (lazy) scores as a KoalaFrame.
-        scores = kl.KoalaFrame(pagerank_scores.lazy().rename({'node': 'src'}))
+        # per-src "mass" = (1-reset) * score / n_outlinks, computed in memory
+        # (both operands are O(nodes)); this is the scalar each out-edge carries.
+        mass = (
+            pagerank_scores.rename({'node': 'src'})
+            .join(n_outlinks, on='src')
+            .with_columns(mass=((pl.col('score') / pl.col('n_outlinks')) * (1 - reset)).cast(pl.Float64))
+            .select('src', 'mass')
+        )
+        # the big, edge-proportional join: edges(src,dst) |><| mass(src,mass).
+        # both sides are single (key, value), so koala's merge_join needs no JSON
+        # -- it returns strings, and group_by_key(sum) parses the mass to float.
         pr_messages = (
             edges
-            .inner_join(scores, on='src', batch_size=batch_size)
-            .with_columns(delta=((pl.col('score') / pl.col('n_outlinks')) * (1 - reset)).cast(pl.Float64))
-            .select('dst', 'delta')
+            .merge_join(kl.KoalaFrame(mass.lazy()), on='src', batch_size=batch_size)
+            .select(pl.col('dst'), pl.col('mass').alias('delta'))
         )
 
         # create the new scores: add up the incoming pagerank messages and add the reset
