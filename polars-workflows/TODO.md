@@ -12,5 +12,6 @@ Engines = polars, koala   Fixed nodes = 20,000   iterations = 2   CSE = on
 # TODO
 
  * convert smoke tests to unit tests
+ * write inner_join(..., how=) to switch implementations
  * write mapside joins for polar/koala
    * as a koala method, not special code like in pagerank_mapper
