@@ -11,11 +11,6 @@ Engines = polars, koala   Fixed nodes = 20,000   iterations = 2   CSE = on
 
 # TODO
 
-demo_memory.pl
- * drilldown and see where the memory use is happening in koala
+ * convert smoke tests to unit tests
  * write mapside joins for polar/koala
    * as a koala method, not special code like in pagerank_mapper
- * write optimized inner_join with key-value pairs (no packing)
-   * sort left, right together with key, lval, rval (one val is always null)
-   * groupby with a special aggregator that (combines lval, rval in a row)
-   * filter by lval != None and rval != None
