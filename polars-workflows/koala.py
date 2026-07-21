@@ -49,9 +49,11 @@ from collections import namedtuple
 
 ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
 
-# How many rows koala accumulates before emitting a DataFrame from its IO
-# source. Smaller batches cap the resident memory of an operator (esp. the
-# list-gathering in inner_join) at the cost of more, smaller DataFrames.
+# How many records koala accumulates before emitting a DataFrame from its IO
+# source, at the cost of more, smaller DataFrames. For sum/len this is rows; for
+# the list-gather in inner_join a "record" is a whole KEY (with all its rows),
+# so smaller batches only partly cap inner_join's memory -- see inner_join's
+# MEMORY note.
 DEFAULT_BATCH_SIZE = 100_000
 
 # Cap the external `sort`'s in-memory buffer with `sort -S`; the rest spills to
@@ -166,6 +168,22 @@ def inner_join(left: pl.LazyFrame, right: pl.LazyFrame, on: str,
     Only left carries the join key, so unnest doesn't collide. Right's non-key
     column names are assumed distinct from left's (add a suffix rule to
     generalize).
+
+    MEMORY (the reason this is koala's peak-RSS sink; see TODO.md #4). The
+    group_by_key(via=list) batches by KEY, but each key's batch entry holds ALL
+    its rows. So peak resident memory is
+
+        O( min(batch_size, #distinct_keys) x rows-per-key )
+      = the number of joined rows in one batch,
+
+    and the explode + json_decode keep the packed strings, the decoded structs,
+    and the exploded rows resident at once (~hundreds of bytes per row). When
+    #keys <= batch_size the WHOLE join lands in a single batch -- measured ~2.5
+    GB for a 4M-row join on 20k keys. Lowering batch_size mitigates (it splits
+    the keys into more, smaller batches) but caps the wrong dimension: for a few
+    high-degree keys it cannot get below one batch. The real fix is a streaming
+    sort-merge join (TODO.md #6): for a many-to-one join it need only buffer the
+    'one' side's single row per key and can stream the 'many' side -> O(1).
     """
     lschema = left.collect_schema()
     rschema = right.collect_schema()
