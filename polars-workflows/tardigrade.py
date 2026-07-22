@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import itertools
 import heapq
-import json
 import os
 import subprocess
 import tempfile
@@ -19,6 +18,49 @@ from collections import deque, namedtuple
 ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
 
 DEFAULT_BATCH_SIZE = 100
+
+# merging f runs holds f files open at once; beyond this we cascade instead
+DEFAULT_MERGE_FANIN = 256
+
+
+class _SpillFile:
+    """One sorted run, written to a temp file and deleted when unreferenced.
+
+    Iterating opens the file, so a run costs a filename until it is read --
+    only the runs actively being merged hold a file descriptor.
+    """
+
+    def __init__(self, rows: Iterable):
+        fd, self.name = tempfile.mkstemp(suffix='.run')
+        with os.fdopen(fd, 'w') as fp:
+            fp.writelines(map(_as_line, rows))
+        weakref.finalize(self, os.unlink, self.name)
+
+    def __iter__(self) -> Iterable:
+        with open(self.name) as fp:
+            yield from fp
+
+
+def _as_line(row: Any) -> str:
+    """Rows are spilled verbatim, one per line -- so they must be text."""
+    if not isinstance(row, str):
+        raise TypeError(
+            f'sort() spills rows as lines of text, but got {type(row).__name__}. '
+            'Serialize rows yourself first, e.g. .map(json.dumps) after importing json')
+    return row if row.endswith('\n') else row + '\n'
+
+
+def _spill_batches(batches: Iterable, key=None, reverse=False) -> tuple[Iterable, int]:
+    """Sorts each batch and spills it; returns the runs and how many there are."""
+    runs = [_SpillFile(sorted(batch, key=key, reverse=reverse)) for batch in batches]
+    return iter(runs), len(runs)
+
+
+def _merge_spills(runs: Iterable, fanin: int, key=None, reverse=False) -> tuple[Iterable, int]:
+    """One merge pass: combines runs in groups of fanin, respilling each group."""
+    merged = [_SpillFile(heapq.merge(*group, key=key, reverse=reverse))
+              for group in itertools.batched(runs, fanin)]
+    return iter(merged), len(merged)
 
 
 #AGGREGATORS = {
@@ -62,33 +104,33 @@ class LazyFrame:
     def filter(self, fn: Callable[Any,Any]) -> LazyFrame:
         return LazyFrame(filter(fn, self.iter))
 
-    def sort(self, 
-             batch_size: int = DEFAULT_BATCH_SIZE, 
-             key: Callable[Any,Any] | None = None,
-             reverse: bool = False) -> LazyFrame:
-        """External merge sort: spill sorted runs to disk, then k-way merge them.
-
-        Peak memory is one batch rather than the whole frame, so this sorts
-        inputs larger than RAM.  Rows must be JSON-serializable.
+    def batched(self, batch_size: int = DEFAULT_BATCH_SIZE) -> LazyFrame:
+        """Groups rows into tuples of batch_size (the last one may be short).
         """
-        # sort each batch and spill it to its own run file
-        def spill(batch):
-            # TemporaryFile is unlinked at creation, so a run is reclaimed on close
-            fp = tempfile.TemporaryFile(mode='w+')
-            for x in sorted(batch, key=key, reverse=reverse):
-                fp.write(json.dumps(x) + '\n')
-            fp.seek(0)
-            return fp
+        return LazyFrame(itertools.batched(self.iter, batch_size))
 
-        def read_run(fp) -> Iterable:
-            with fp:
-                for line in fp:
-                    yield json.loads(line)
+    def sort(self,
+             batch_size: int = DEFAULT_BATCH_SIZE,
+             key: Callable[Any,Any] | None = None,
+             reverse: bool = False,
+             max_fanin: int = DEFAULT_MERGE_FANIN) -> LazyFrame:
+        """External merge sort: spill sorted runs to disk, then merge them.
 
-        # one heap over all runs: O(n log k), vs O(n*k) for repeated pairwise merges
+        Peak memory is one batch plus at most max_fanin open runs, so this
+        sorts inputs larger than RAM.  Rows are written verbatim as lines, so
+        pick your own serialization if they aren't already text -- e.g. with
+        the stdlib json module,
+            frame.map(json.dumps).sort(key=...).map(json.loads)
+        """
         def generator():
-            runs = [spill(batch) for batch in itertools.batched(self.iter, batch_size)]
-            yield from heapq.merge(*map(read_run, runs), key=key, reverse=reverse)
+            runs, n_runs = _spill_batches(
+                self.batched(batch_size).iter, key=key, reverse=reverse)
+            # merging n runs at once holds n files open, so cascade if n is large.
+            # Each pass rewrites everything, so prefer one pass: log_fanin(n) of them.
+            while n_runs > max_fanin:
+                runs, n_runs = _merge_spills(
+                    runs, max_fanin, key=key, reverse=reverse)
+            yield from heapq.merge(*runs, key=key, reverse=reverse)
 
         return LazyFrame(generator())
 
