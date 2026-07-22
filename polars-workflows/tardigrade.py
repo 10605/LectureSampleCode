@@ -16,10 +16,10 @@ from collections import deque, namedtuple
 
 ReduceSpec = namedtuple('ReduceSpec', ['input_col', 'output_col', 'aggregator'])
 
-DEFAULT_BATCH_SIZE = 100
+DEFAULT_BATCH_SIZE = 1024
 
 # merging f runs holds f files open at once; beyond this we cascade instead
-DEFAULT_MERGE_FANIN = 256
+DEFAULT_MERGE_FANIN = 16
 
 # Aggregators are handed an *iterator* over a group, so that reducing a group
 # needn't hold it in memory.  len() is the one common aggregator that insists on
@@ -72,16 +72,28 @@ def _merge_spills(runs: Iterable, fanin: int, key=None, reverse=False) -> tuple[
 class LazyFrame:
 
     def __init__(self, iter: Iterable):
+        """Wraps any iterable of rows.  Nothing is read until collect().
+
+        A frame is ONE-SHOT, like the iterator inside it: collecting or
+        iterating consumes it, so re-read the source to go round again.
+        """
         self.iter = iter
-    
+
     #
     # chaining API
     #
 
     def map(self, fn: Callable[Any, Any]) -> LazyFrame:
+        """Applies fn to every row.
+        """
         return LazyFrame(map(fn, self.iter))
 
     def head(self, k=20) -> LazyFrame:
+        """First k rows, or all of them if the frame is shorter.
+
+        islice rather than a next() loop: next() past the end raises
+        StopIteration, which PEP 479 turns into RuntimeError inside a generator.
+        """
         return LazyFrame(itertools.islice(self.iter, k))
 
     def tail(self, k=20) -> LazyFrame:
@@ -99,12 +111,21 @@ class LazyFrame:
         return LazyFrame(generator()) 
 
     def collect(self) -> list:
+        """Runs the pipeline and returns every row as a list.
+
+        This is the point where the work actually happens -- and where the
+        result stops being streaming, since the whole thing lands in memory.
+        """
         return list(self.iter)
 
     def explode(self) -> LazyFrame:
+        """Flattens one level: each row must itself be iterable.
+        """
         return LazyFrame(itertools.chain.from_iterable(self.iter))
 
     def filter(self, fn: Callable[Any,Any]) -> LazyFrame:
+        """Keeps the rows for which fn is true.
+        """
         return LazyFrame(filter(fn, self.iter))
 
     def batched(self, batch_size: int = DEFAULT_BATCH_SIZE) -> LazyFrame:
@@ -210,6 +231,12 @@ class LazyFrame:
 
 
     def sink(self, filename, *open_args, **open_kw):
+        """Writes every row to a file, one row per write, holding none of them.
+
+        Rows are written verbatim, so they must be text and carry their own
+        newline -- as scan_lines produces them.  The streaming counterpart to
+        collect(): the terminal operation that does NOT build a list.
+        """
         with open(filename, *open_args, **open_kw) as fp:
             for x in self.iter:
                 fp.write(x)
@@ -221,6 +248,15 @@ class LazyFrame:
 
 
 def concat(lfs: list[LazyFrame], how: str) -> LazyFrame:
+    """Combines frames, as polars' pl.concat does.
+
+    vertical   -- one frame's rows after another's.
+    horizontal -- rows side by side, as tuples.  zip_longest, so a short frame
+                  is padded with None rather than truncating the others, which
+                  is what polars does with nulls.
+
+    Both stream: a row is pulled from a source only when one is asked for.
+    """
     if how == 'vertical':
         return LazyFrame(itertools.chain.from_iterable(lf.iter for lf in lfs))
     elif how == 'horizontal':
@@ -230,9 +266,13 @@ def concat(lfs: list[LazyFrame], how: str) -> LazyFrame:
 
 
 def scan_lines(filename: str, *open_args, **open_kw) -> LazyFrame:
+    """A frame of the lines of a file, read lazily.  Rows keep their newline.
+    """
     return LazyFrame(_scan_lines(filename, *open_args, **open_kw))
 
 def scan_gz_lines(filename: str, *open_args, **open_kw) -> LazyFrame:
+    """The same, for a gzipped file, decompressed by a gunzip subprocess.
+    """
     return LazyFrame(_scan_gz_lines(filename, *open_args, **open_kw))
 
 def _scan_lines(filename: str, *open_args, **open_kw):
