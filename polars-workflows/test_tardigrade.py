@@ -224,6 +224,76 @@ def test_group_by_key_holds_only_one_group():
     assert peak_bytes(run) < 5_000_000, 'group_by_key buffered a group'
 
 
+# --- merge_join ---
+
+def nested_loop_join(left, right, key=KEY, right_key=None):
+    """Oracle: the O(n*m) definition of an inner join."""
+    right_key = right_key or key
+    return sorted((key(l), l, r) for l in left for r in right if key(l) == right_key(r))
+
+
+def test_merge_join_many_to_one():
+    left = [f'k{i % 4}\tedge{i}\n' for i in range(20)]
+    right = [f'k{i}\t{i * 10}\n' for i in range(4)]
+    got = tg.LazyFrame(iter(left)).merge_join(tg.LazyFrame(iter(right)), key=KEY).collect()
+    assert sorted(got) == nested_loop_join(left, right)
+
+
+def test_merge_join_many_to_many():
+    left = ['a\t1\n', 'a\t2\n', 'b\t3\n', 'c\t4\n']
+    right = ['a\t10\n', 'a\t20\n', 'b\t30\n', 'd\t40\n']
+    got = tg.LazyFrame(iter(left)).merge_join(tg.LazyFrame(iter(right)), key=KEY).collect()
+    assert sorted(got) == nested_loop_join(left, right)
+    assert len(got) == 5, 'a x a should be 2x2, plus b'
+
+
+def test_merge_join_inner_gate_drops_one_sided_keys():
+    """Keys on only one side vanish -- including a right-only key, which the
+    'no lefts buffered' branch must handle rather than emitting."""
+    left = ['a\t1\n', 'only_left\t2\n']
+    right = ['a\t10\n', 'only_right\t20\n']
+    got = tg.LazyFrame(iter(left)).merge_join(tg.LazyFrame(iter(right)), key=KEY).collect()
+    assert got == [('a', 'a\t1\n', 'a\t10\n')]
+
+
+@pytest.mark.parametrize('left,right', [
+    ([], []),
+    (['a\t1\n'], []),
+    ([], ['a\t1\n']),
+])
+def test_merge_join_empty(left, right):
+    assert tg.LazyFrame(iter(left)).merge_join(tg.LazyFrame(iter(right)), key=KEY).collect() == []
+
+
+def test_merge_join_distinct_key_functions():
+    """The two sides need not be shaped alike."""
+    left = ['a,1\n', 'b,2\n']
+    right = ['a\t10\n', 'b\t20\n']
+    got = tg.LazyFrame(iter(left)).merge_join(
+        tg.LazyFrame(iter(right)), key=lambda r: r.split(',')[0], right_key=KEY).collect()
+    assert sorted(got) == nested_loop_join(left, right, key=lambda r: r.split(',')[0], right_key=KEY)
+
+
+def test_merge_join_spills(pairs):
+    """Joining inherits sort()'s external behavior, cascade included."""
+    right = [f'k{i}\tr{i}\n' for i in range(20)]
+    got = tg.LazyFrame(iter(pairs)).merge_join(
+        tg.LazyFrame(iter(right)), key=KEY, batch_size=7, max_fanin=4).collect()
+    assert sorted(got) == nested_loop_join(pairs, right)
+
+
+def test_merge_join_streams_the_many_side():
+    """The koala improvement: with the 'one' side on the left, a high-degree key
+    does not buffer the 'many' side (100k rows all sharing one key)."""
+    def run():
+        left = iter(['k\tone\n'])
+        right = (f'k\tmany{i}\n' for i in range(100_000))
+        return sum(1 for _ in tg.LazyFrame(left).merge_join(
+            tg.LazyFrame(right), key=KEY, batch_size=1_000).iter)
+
+    assert peak_bytes(run) < 5_000_000, 'merge_join buffered the streaming side'
+
+
 # --- batched ---
 
 @pytest.mark.parametrize('batch_size,want', [

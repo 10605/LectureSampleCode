@@ -67,13 +67,6 @@ def _merge_spills(runs: Iterable, fanin: int, key=None, reverse=False) -> tuple[
     return iter(merged), len(merged)
 
 
-#AGGREGATORS = {
-#    len:  (lambda vs: sum(1 for _ in vs),        pl.Int64),
-#    sum:  (lambda vs: sum(float(v) for v in vs), pl.Float64),
-#    list: (lambda vs: list(vs),                  pl.List(pl.String)),
-#}
-
-
 class LazyFrame:
 
     def __init__(self, iter: Iterable):
@@ -171,7 +164,44 @@ class LazyFrame:
                 yield k, agg(grp if value is None else map(value, grp))
         return LazyFrame(generator())
 
-    #  join
+    def merge_join(self, right: LazyFrame, key: Callable[Any,Any],
+                   right_key: Callable[Any,Any] | None = None, **sort_kw) -> LazyFrame:
+        """Inner join on a key, yielding (key, left_row, right_row) triples.
+
+            edges.merge_join(n_outlinks, key=first_field)
+
+        A join is a group-by on the join key where each key emits the cross
+        product of its left and right rows, so this is group_by_key's skeleton:
+        tag each side, sort the two together, and walk one key's run at a time.
+
+        Only the LEFT side of a key is buffered -- the right streams past it --
+        because sorting is stable and left rows are concatenated first, so a
+        key's left rows always arrive before its right ones.  Put the 'one'
+        side of a many-to-one join on the left and memory is O(1) in the
+        'many' side; otherwise it is O(left rows per key).
+
+        right_key defaults to key, for when the two sides are shaped alike.
+        """
+        right_key = right_key or key
+        # tag rows so the two sides stay distinguishable once interleaved;
+        # the tag is a prefix, so the key functions see the original row
+        tagged_key = lambda row: (key if row[0] == 'L' else right_key)(row[1:])
+
+        def generator():
+            both = itertools.chain(map('L'.__add__, self.iter),
+                                   map('R'.__add__, right.iter))
+            rows = LazyFrame(both).sort(key=tagged_key, **sort_kw).iter
+            for k, grp in itertools.groupby(rows, key=tagged_key):
+                lefts = []
+                for row in grp:
+                    if row[0] == 'L':
+                        lefts.append(row[1:])
+                    else:
+                        # no lefts => key is right-only, so the inner gate drops it
+                        yield from ((k, l, row[1:]) for l in lefts)
+
+        return LazyFrame(generator())
+
 
     def sink(self, filename, *open_args, **open_kw):
         with open(filename, *open_args, **open_kw) as fp:
