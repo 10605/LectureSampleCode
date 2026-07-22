@@ -91,8 +91,8 @@ def test_sort_adds_missing_newline():
 
 
 def test_sort_rejects_non_text_rows():
-    """Serializing is the caller's job, but the error should say so."""
-    with pytest.raises(TypeError, match='json.dumps'):
+    """Serializing is the caller's job -- spilling only handles text."""
+    with pytest.raises(ValueError, match='must be strings'):
         tg.LazyFrame(iter([3, 1, 2])).sort(batch_size=2).collect()
 
 
@@ -292,6 +292,40 @@ def test_merge_join_streams_the_many_side():
             tg.LazyFrame(right), key=KEY, batch_size=1_000).iter)
 
     assert peak_bytes(run) < 5_000_000, 'merge_join buffered the streaming side'
+
+
+# --- concat ---
+
+def test_concat_vertical():
+    frames = [tg.LazyFrame(iter(['a\n', 'b\n'])), tg.LazyFrame(iter(['c\n']))]
+    assert tg.concat(frames, 'vertical').collect() == ['a\n', 'b\n', 'c\n']
+
+
+def test_concat_vertical_empty():
+    assert tg.concat([], 'vertical').collect() == []
+    assert tg.concat([tg.LazyFrame(iter([]))], 'vertical').collect() == []
+
+
+def test_concat_horizontal():
+    frames = [tg.LazyFrame(iter(['a\n', 'b\n'])), tg.LazyFrame(iter(['c\n', 'd\n']))]
+    assert tg.concat(frames, 'horizontal').collect() == [('a\n', 'c\n'), ('b\n', 'd\n')]
+
+
+def test_concat_horizontal_pads_ragged():
+    """zip_longest, so the shorter side is padded -- polars' horizontal fills null."""
+    frames = [tg.LazyFrame(iter(['a\n', 'b\n'])), tg.LazyFrame(iter(['c\n']))]
+    assert tg.concat(frames, 'horizontal').collect() == [('a\n', 'c\n'), ('b\n', None)]
+
+
+def test_concat_rejects_unknown_how():
+    with pytest.raises(ValueError, match='unimplemented'):
+        tg.concat([tg.LazyFrame(iter([]))], 'diagonal')
+
+
+def test_concat_is_lazy():
+    it = iter(['a\n'])
+    tg.concat([tg.LazyFrame(it)], 'vertical')
+    assert next(it) == 'a\n', 'concat ran at construction time'
 
 
 # --- batched ---

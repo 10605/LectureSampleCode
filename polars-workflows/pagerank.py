@@ -23,7 +23,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True):
     # construct edges
     edges = (
         edge_lines
-        .with_columns(edge=pl.col('line').str.extract_groups(r'(\w+)\s+(\w+)'))
+        .with_columns(edge=pl.col('line').str.extract_groups(r'(\S+)\s+(\S+)'))
         .with_columns(
             src=pl.col('edge').struct['1'],
             dst=pl.col('edge').struct['2'])

@@ -27,6 +27,10 @@ DEFAULT_MERGE_FANIN = 256
 ITERATOR_AGGREGATORS = {len: lambda vs: sum(1 for _ in vs)}
 
 
+#
+# helpers
+#
+
 class _SpillFile:
     """One sorted run, written to a temp file and deleted when unreferenced.
 
@@ -35,6 +39,10 @@ class _SpillFile:
     """
 
     def __init__(self, rows: Iterable):
+        def _as_line(row: Any) -> str:
+            if not isinstance(row, str):
+                raise ValueError('spilled objects must be strings')
+            return row.rstrip() + '\n'
         fd, self.name = tempfile.mkstemp(suffix='.run')
         with os.fdopen(fd, 'w') as fp:
             fp.writelines(map(_as_line, rows))
@@ -43,16 +51,6 @@ class _SpillFile:
     def __iter__(self) -> Iterable:
         with open(self.name) as fp:
             yield from fp
-
-
-def _as_line(row: Any) -> str:
-    """Rows are spilled verbatim, one per line -- so they must be text."""
-    if not isinstance(row, str):
-        raise TypeError(
-            f'sort() spills rows as lines of text, but got {type(row).__name__}. '
-            'Serialize rows yourself first, e.g. .map(json.dumps) after importing json')
-    return row if row.endswith('\n') else row + '\n'
-
 
 def _spill_batches(batches: Iterable, key=None, reverse=False) -> tuple[Iterable, int]:
     """Sorts each batch and spills it; returns the runs and how many there are."""
@@ -67,11 +65,19 @@ def _merge_spills(runs: Iterable, fanin: int, key=None, reverse=False) -> tuple[
     return iter(merged), len(merged)
 
 
+#
+# The LazyFrame class
+#
+
 class LazyFrame:
 
     def __init__(self, iter: Iterable):
         self.iter = iter
     
+    #
+    # chaining API
+    #
+
     def map(self, fn: Callable[Any, Any]) -> LazyFrame:
         return LazyFrame(map(fn, self.iter))
 
@@ -209,18 +215,45 @@ class LazyFrame:
                 fp.write(x)
             
 
-# zip, concat
+#
+# functions that create LazyFrames
+#
 
-def scan_lines(filename: str, *open_args, **open_kw):
-    for line in open(filename, *open_args, **open_kw):
-        yield line
 
-def scan_gz_lines(filename: str, *open_args, **open_kw):
+def concat(lfs: list[LazyFrame], how: str) -> LazyFrame:
+    if how == 'vertical':
+        return LazyFrame(itertools.chain.from_iterable(lf.iter for lf in lfs))
+    elif how == 'horizontal':
+        return LazyFrame(itertools.zip_longest(*(lf.iter for lf in lfs)))
+    else:
+        raise ValueError(f'unimplemented concat "how" method "{how}"')
+
+
+def scan_lines(filename: str, *open_args, **open_kw) -> LazyFrame:
+    return LazyFrame(_scan_lines(filename, *open_args, **open_kw))
+
+def scan_gz_lines(filename: str, *open_args, **open_kw) -> LazyFrame:
+    return LazyFrame(_scan_gz_lines(filename, *open_args, **open_kw))
+
+def _scan_lines(filename: str, *open_args, **open_kw):
+    """Returns an iterator over lines in a file.
+    """
+    with open(filename, *open_args, **open_kw) as fp:
+        yield from fp
+
+def _scan_gz_lines(filename: str):
+    """Returns an iterator over lines in a zipped file.
+    """
     process = subprocess.Popen(
-        [f"gunzip -c {filename} | grep -v '#'"],
-        shell=True,
-        text=False,
+        ['gunzip', '-c', filename],
+        text=True,
         stdout=subprocess.PIPE,
     )
-    for line in process.stdout:
-        yield line
+    with process.stdout as fp:
+        yield from fp
+    # only reached if the reader drained us: a truncated .gz would otherwise
+    # look like a short file.  Abandoning early (head) skips this by design,
+    # since gunzip is then killed by SIGPIPE.
+    if process.wait():
+        raise subprocess.CalledProcessError(process.returncode, process.args)
+
