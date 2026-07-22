@@ -10,6 +10,9 @@ autodiff/*.gv.pdf
 hazsoup/*.json
 unix-poetry/*.wc
 
+# large downloaded corpora (enwiki-2013 etc)
+data/*.gz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
