@@ -10,7 +10,6 @@ import weakref
 
 
 from collections.abc import Iterable
-from itertools import groupby
 from typing import Any, Callable
 
 from collections import deque, namedtuple
@@ -21,6 +20,11 @@ DEFAULT_BATCH_SIZE = 100
 
 # merging f runs holds f files open at once; beyond this we cascade instead
 DEFAULT_MERGE_FANIN = 256
+
+# Aggregators are handed an *iterator* over a group, so that reducing a group
+# needn't hold it in memory.  len() is the one common aggregator that insists on
+# a sized object, so count without materializing; sum/max/min/list are fine.
+ITERATOR_AGGREGATORS = {len: lambda vs: sum(1 for _ in vs)}
 
 
 class _SpillFile:
@@ -134,8 +138,41 @@ class LazyFrame:
 
         return LazyFrame(generator())
 
+    def unique(self, is_sorted: bool = False, *sort_args, **sort_kw) -> LazyFrame:
+        """Drops duplicate rows.  Sorts first unless the frame already is.
 
-    # unique, group_by_key, join
+        groupby only collapses *adjacent* equal rows, which is why sorting is
+        what makes this O(1) in the number of distinct rows rather than O(n).
+        """
+        iter_to_group = self.iter if is_sorted else self.sort(*sort_args, **sort_kw).iter
+        return LazyFrame(k for k, _ in itertools.groupby(iter_to_group))
+
+    def group_by_key(self, key: Callable[Any,Any], agg: Callable[Any,Any] = list,
+                     value: Callable[Any,Any] | None = None,
+                     is_sorted: bool = False, **sort_kw) -> LazyFrame:
+        """Groups rows by key and reduces each group, yielding (key, aggregate).
+
+            frame.group_by_key(key=first_field, agg=len)
+            frame.group_by_key(key=first_field, value=second_field, agg=sum)
+
+        Sorting brings equal keys together so groupby can collapse each run,
+        so memory is one group rather than one entry per distinct key -- only
+        agg=list holds a whole group, while len/sum/max stay O(1).  Sorting is
+        stable, so a key's values arrive in input order.
+
+        agg is passed an iterator, and must consume it before the next key is
+        reached (list, sum, len, max all do); returning a lazy generator from agg
+        yields empty groups.
+        """
+        agg = ITERATOR_AGGREGATORS.get(agg, agg)
+        def generator():
+            rows = self.iter if is_sorted else self.sort(key=key, **sort_kw).iter
+            for k, grp in itertools.groupby(rows, key=key):
+                yield k, agg(grp if value is None else map(value, grp))
+        return LazyFrame(generator())
+
+    #  join
+
     def sink(self, filename, *open_args, **open_kw):
         with open(filename, *open_args, **open_kw) as fp:
             for x in self.iter:

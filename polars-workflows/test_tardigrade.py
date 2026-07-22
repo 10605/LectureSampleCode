@@ -11,7 +11,9 @@ proportional to batch_size, and at most max_fanin files open at once.
 
 Rows are lines of text, as produced by scan_lines and consumed by sink.
 """
+import collections
 import gc
+from collections import deque
 import os
 import random
 import tracemalloc
@@ -22,6 +24,20 @@ import tardigrade as tg
 
 BATCH_SIZES = [1, 2, 3, 7, 100, 10_000]      # 1 and 2 stress the merge;
                                              # 10_000 puts everything in one run
+
+
+def peak_bytes(fn):
+    """Peak allocation while running fn().
+
+    Stops tracing even if fn raises -- otherwise one failing memory test leaks
+    tracing state into the next one, whose peak then includes this test's.
+    """
+    tracemalloc.start()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
 
 
 @pytest.fixture
@@ -84,16 +100,11 @@ def test_sort_rejects_non_text_rows():
 
 def test_sort_peak_memory_tracks_batch_size():
     """The point of spilling: RAM follows batch_size, not frame size."""
-    def peak(batch_size):
+    def drain(batch_size):
         lines = (f'{i}\n' for i in range(200_000))
-        tracemalloc.start()
-        for _ in tg.LazyFrame(lines).sort(batch_size=batch_size).iter:
-            pass
-        p = tracemalloc.get_traced_memory()[1]
-        tracemalloc.stop()
-        return p
+        return lambda: deque(tg.LazyFrame(lines).sort(batch_size=batch_size).iter, maxlen=0)
 
-    assert peak(1_000) < peak(200_000) / 2
+    assert peak_bytes(drain(1_000)) < peak_bytes(drain(200_000)) / 2
 
 
 @pytest.mark.parametrize('max_fanin', [2, 4, 16])
@@ -128,6 +139,89 @@ def test_spill_files_are_deleted(rows, monkeypatch):
     gc.collect()
     assert names, 'no runs were spilled'
     assert not [n for n in names if os.path.exists(n)], 'spill files leaked'
+
+
+# --- unique ---
+
+def test_unique(rows):
+    assert tg.LazyFrame(iter(rows)).unique().collect() == sorted(set(rows))
+
+
+def test_unique_presorted():
+    """is_sorted=True skips the sort -- and only collapses *adjacent* dups."""
+    lines = ['a\n', 'a\n', 'b\n', 'a\n']
+    assert tg.LazyFrame(iter(lines)).unique(is_sorted=True).collect() == ['a\n', 'b\n', 'a\n']
+
+
+def test_unique_empty():
+    assert tg.LazyFrame(iter([])).unique().collect() == []
+
+
+# --- group_by_key ---
+
+@pytest.fixture
+def pairs():
+    """key<TAB>value lines, keys repeating, in deliberately unsorted order."""
+    rng = random.Random(7)
+    return [f'k{rng.randrange(20)}\t{i}\n' for i in range(500)]
+
+
+KEY = lambda line: line.split('\t')[0]
+VALUE = lambda line: int(line.split('\t')[1])
+
+
+def test_group_by_key_len(pairs):
+    want = collections.Counter(map(KEY, pairs))
+    assert dict(tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, agg=len).collect()) == want
+
+
+def test_group_by_key_sum(pairs):
+    want = collections.defaultdict(int)
+    for line in pairs:
+        want[KEY(line)] += VALUE(line)
+    got = tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, value=VALUE, agg=sum).collect()
+    assert dict(got) == dict(want)
+
+
+def test_group_by_key_list_preserves_input_order(pairs):
+    """sort() is stable, so a key's values arrive in the order they were read."""
+    want = collections.defaultdict(list)
+    for line in pairs:
+        want[KEY(line)].append(VALUE(line))
+    got = tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, value=VALUE, agg=list).collect()
+    assert dict(got) == dict(want)
+
+
+def test_group_by_key_emits_each_key_once(pairs):
+    keys = [k for k, _ in tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, agg=len).collect()]
+    assert len(keys) == len(set(keys)) == len(set(map(KEY, pairs)))
+    assert keys == sorted(keys)
+
+
+def test_group_by_key_empty():
+    assert tg.LazyFrame(iter([])).group_by_key(key=KEY, agg=len).collect() == []
+
+
+def test_group_by_key_presorted_skips_sort(pairs):
+    """is_sorted=True must not re-sort -- and needs genuinely sorted input."""
+    assert (tg.LazyFrame(iter(sorted(pairs))).group_by_key(key=KEY, agg=len, is_sorted=True).collect()
+            == tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, agg=len).collect())
+
+
+def test_group_by_key_spills(pairs):
+    """The whole point: grouping inherits sort()'s external, batched behavior."""
+    got = tg.LazyFrame(iter(pairs)).group_by_key(key=KEY, agg=len, batch_size=7, max_fanin=4)
+    assert dict(got.collect()) == collections.Counter(map(KEY, pairs))
+
+
+def test_group_by_key_holds_only_one_group():
+    """agg gets an iterator, so len never materializes a group -- even though
+    these 200k rows are only 3 keys, i.e. ~67k rows per group."""
+    def run():
+        lines = (f'k{i % 3}\t{i}\n' for i in range(200_000))
+        return tg.LazyFrame(lines).group_by_key(key=KEY, agg=len, batch_size=1_000).collect()
+
+    assert peak_bytes(run) < 5_000_000, 'group_by_key buffered a group'
 
 
 # --- batched ---
@@ -183,10 +277,8 @@ def test_head_does_not_over_consume():
 
 
 def test_tail_holds_only_k_rows():
-    tracemalloc.start()
-    got = tg.LazyFrame(iter(range(500_000))).tail(3).collect()
-    peak = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
+    got = []
+    peak = peak_bytes(lambda: got.extend(tg.LazyFrame(iter(range(500_000))).tail(3).collect()))
     assert got == [499_997, 499_998, 499_999]
     assert peak < 100_000, f'tail buffered the frame ({peak} bytes)'
 
