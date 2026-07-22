@@ -1,10 +1,10 @@
 # STATUS
 
-polars seems to really like using memory.  I should try on a smaller
-machine to see what it does.  and maybe write a 'real' merge sort
+## Koala vs Polars
 
-koala now uses the streaming merge_join (no JSON) in the pagerank loop; matches
-pagerank.py exactly. Per-iteration join+sum dropped ~4.9x vs inner_join (see
+Koala was an effort to rewrite *just the memory-intensive parts* of
+polars, using external unix sorts.  That didn't work - polars seems to
+really like using memory!
 
 Fixed nodes = 20,000   iterations = 2   CSE = on   (columns = total lines)
 
@@ -24,13 +24,26 @@ koala-lazy             4.5         9.8        19.6        38.9       100.0      
 polars-lazy            0.1         0.1         0.3         0.5         1.0         1.7
 
 
+## Tardigrade (water bears) vs Polars
+
+Tardigrade is all based on Python generators and on-disk sorting.
+This is actually low memory.
+
+self RSS (MB)     1,020,000   2,020,000   4,020,000   8,020,000  16,020,000 32,020,000
+--------------------------------------------------------------------------------------
+polars-eager          355.3       539.8       827.6      1278.3      2000.9     3502.5
+polars-lazy           374.8       491.9       743.5      1177.5      1931.5     3093.7
+tardigrade-lazy        79.2        80.4        83.8        86.8        88.5       89.5
+									                               
+elapsed (s)       1,020,000   2,020,000   4,020,000   8,020,000  16,020,000 32,020,000
+--------------------------------------------------------------------------------------
+polars-eager            0.1         0.1         0.3         0.5         0.8        1.5
+polars-lazy             0.1         0.2         0.3         0.5         0.8        1.5
+tardigrade-lazy         5.0        11.7        23.9        50.1       106.5      240.5
+
+
 # TODO
 
- * [done] drilldown where the memory goes in koala -> inner_join list-gather (#4)
- * [done] convert smoke tests to unit tests -> test_koala.py (pytest, 10 tests)
- * [done] optimized inner_join with key-value pairs (no packing) -> merge_join
-   * sort left, right together with key, lval, rval (tagged L/R)
-   * per-key combine in the streaming layer; inner gate = both sides present
- * write inner_join(..., how=) to switch implementations
- * write mapside joins for polar/koala
-   * as a koala method, not special code like in pagerank_mapper
+ * write mapside joins for tardigrade?
+ * could try koala/polars on my laptop I guess to see if polars is
+   using memory "because it can"
