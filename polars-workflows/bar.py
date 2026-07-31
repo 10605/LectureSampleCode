@@ -8,8 +8,10 @@ import heapq
 import os
 import tempfile
 import weakref
+import polars as pl
 
 from typing import Any, Callable, Iterable, Optional
+
 
 EncoderFn =  Optional[Callable[[Any],str]]
 DecoderFn = Optional[Callable[[str],Any]]
@@ -17,7 +19,21 @@ DecoderFn = Optional[Callable[[str],Any]]
 DEFAULT_ENCODER = repr
 DEFAULT_DECODER = ast.literal_eval
 
-BY_KEY=lambda kv:kv[0]
+_BY_KEY=lambda kv:kv[0]
+
+#
+# useful aggregator names
+#
+
+def count(group: Iterable):
+    """Lazy way to count elements in an iterable.
+    """
+    return sum(1 for _ in group)
+
+def first(group: Iterable):
+    """First element.
+    """
+    return next(group)
 
 def _pairs_from(input_tsv_path, decode):
     """Iterator over the key-value pairs in a key-value tsv file.
@@ -37,7 +53,7 @@ class _SortSpillFile:
         self.encode = encode
         self.decode = decode
         with os.fdopen(fd, 'w') as fp:
-            for key, value in sorted(batch, key=BY_KEY):
+            for key, value in sorted(batch, key=_BY_KEY):
                 fp.write(self.encode(key) + '\t' + self.encode(value) + '\n')
         weakref.finalize(self, os.unlink, self.name)
 
@@ -52,6 +68,21 @@ class PolarBar:
         self.decode = decode or DEFAULT_DECODER
         self.sort_batch_size = sort_batch_size
         self.sort_fanin = sort_fanin
+        self.sorted_kv_pair_paths = set()
+
+    def _check_sorted(self, path):
+        if not path in self.sorted_kv_pair_paths:
+            raise ValueError(f'{path} is not known to be sorted')
+
+    def _mark_sorted(self, path):
+        self.sorted_kv_pair_paths.add(path)
+
+    def sink_kv_pairs(self, ldf: pl.LazyFrame, output_tsv_path, key_col: str, val_col: str, is_sorted=False):
+        kv_df = ldf.select([key_col,val_col])
+        kv_df.sink_csv(output_tsv_path, separator='\t', include_header=False)
+        # only the caller knows if the frame was already sorted by key
+        if is_sorted:
+            self._mark_sorted(output_tsv_path)
 
     def sort_kv_pairs(self, input_tsv_path, output_tsv_path):
         """ Merge-sort key value pairs in the file, only holding sort_batch_size items in memory.
@@ -59,23 +90,59 @@ class PolarBar:
         spill_files = [_SortSpillFile(batch, self.encode, self.decode)
                        for batch in itertools.batched(_pairs_from(input_tsv_path, self.decode), self.sort_batch_size)]
         while len(spill_files) > self.sort_fanin:
-            spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=BY_KEY), self.encode, self.decode)
+            spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=_BY_KEY), self.encode, self.decode)
                            for file_batch in itertools.batched(iter(spill_files), self.sort_fanin)]
-        final_sort = heapq.merge(*spill_files, key=BY_KEY)
+        final_sort = heapq.merge(*spill_files, key=_BY_KEY)
 
         # write to the output file
         with open(output_tsv_path, 'w') as fp:
             for key, val in final_sort:
                 fp.write(self.encode(key) + '\t' + self.encode(val) + '\n') 
+        self._mark_sorted(output_tsv_path)
 
     def group_and_aggregate_by_key(self, input_tsv_path, output_tsv_path, agg: Callable[[Iterable],Any]):
-        """ Group the items by key, and aggregate the results.  Items must be sorted by key.
+        """Group the items in a kv tsv by key, and aggregate the results.  Items must be sorted by key.
 
         Aggregator should consume an iterable, so things sum, list, min, max are ok.
         To count pass in "lambda values: sum(1 for _ in values)".
         """
+        self._check_sorted(input_tsv_path)
         with open(output_tsv_path, 'w') as fp:
-            for key, group in itertools.groupby(_pairs_from(input_tsv_path, self.decode), key=BY_KEY):
+            for key, group in itertools.groupby(_pairs_from(input_tsv_path, self.decode), key=_BY_KEY):
                 group_values = (v for _, v in group)
                 fp.write(self.encode(key) + '\t' + self.encode(agg(group_values)) + '\n')
-            
+        self._mark_sorted(output_tsv_path)
+
+    def join_by_key(self, input_tsv_path1, input_tsv_path2, output_tsv_path, combine_vals: Callable[[Any, Any],Any]):
+        self._check_sorted(input_tsv_path1)
+        self._check_sorted(input_tsv_path2)
+
+        def by_key_then_source(pair):
+            key, (val_src, val) = pair
+            return (key, val_src)
+
+        def tag_values(tag, path):
+            for key, val in _pairs_from(path, self.decode):
+                yield key, (tag, val)
+
+        merged_pairs = heapq.merge(
+            tag_values('L', input_tsv_path1),
+            tag_values('R', input_tsv_path2),
+            key=by_key_then_source)
+
+        with open(output_tsv_path, 'w') as fp:
+            for key, group in itertools.groupby(merged_pairs, key=_BY_KEY):
+                # values from the left come first
+                left = []
+                for _, (val_src, val) in group:
+                    if val_src == 'L': 
+                        left.append(val)
+                    else:
+                        # values from the right needs to paired with all the left
+                        # values
+                        for left_val in left:
+                            combined_val = combine_vals(left_val, val)
+                            fp.write(self.encode(key) + '\t' + self.encode(combined_val) + '\n')
+
+        self._mark_sorted(output_tsv_path)
+
