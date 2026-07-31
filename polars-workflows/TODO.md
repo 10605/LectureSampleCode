@@ -42,6 +42,25 @@ polars-lazy             0.1         0.2         0.3         0.5         0.8     
 tardigrade-lazy         5.0        11.7        23.9        50.1       106.5      240.5
 
 
+## PolarBar
+
+This is a second koala-like attempt to localize use of polar's memory
+by pulling out joins and group_by operations.  It also doesn't seem to
+work.
+
+self RSS (MB)    1,250,000   2,000,000   5,000,000
+--------------------------------------------------
+polarbar-lazy        470.5       662.8      1018.4
+
+child RSS (MB)   1,250,000   2,000,000   5,000,000
+--------------------------------------------------
+polarbar-lazy          0.0         0.0         0.0
+
+elapsed (s)      1,250,000   2,000,000   5,000,000
+--------------------------------------------------
+polarbar-lazy         11.7        20.9        50.3
+
+
 # TODO
 
  * write mapside joins for tardigrade?

@@ -14,10 +14,11 @@ To make that visible we run two ways of feeding the same graph to pagerank():
           re-wrapped as lazy. This pins all the lines in RAM and is the
           contrast case: its peak RSS grows with the number of edges.
 
-...across three implementations of the same algorithm (--engine): polars
-(pagerank.py), koala (pagerank_kl.py) and tardigrade (pagerank_tg.py). koala
-spills to an external `sort` subprocess; tardigrade spills to temp files from
-inside the process, so neither shows up the same way -- see the child RSS table.
+...across four implementations of the same algorithm (--engine): polars
+(pagerank.py), polarbar (pagerank_bar.py), koala (pagerank_kl.py) and tardigrade
+(pagerank_tg.py). koala spills to an external `sort` subprocess; tardigrade and
+polarbar spill to temp files from inside the process, so none of them shows up
+the same way -- see the child RSS table.
 
 Because peak RSS is a per-process high-water mark, each configuration is run in
 its own subprocess so the numbers don't contaminate each other.
@@ -55,6 +56,7 @@ import polars as pl
 import koala as kl
 import tardigrade as tg
 import pagerank
+import pagerank_bar
 import pagerank_kl
 import pagerank_tg
 
@@ -64,6 +66,10 @@ from collections import namedtuple
 # the edge counts swept here it would spill tens of thousands of runs. Use a
 # realistic run size unless --batch_size says otherwise.
 TARDIGRADE_BATCH_SIZE = 100_000
+
+# Same story for PolarBar's sort_batch_size (default 1024 pairs): at a million
+# edges that is ~1000 spill files per sort. Use a realistic run size instead.
+POLARBAR_BATCH_SIZE = 100_000
 
 # The pagerank implementations, keyed by --engine.
 #
@@ -98,9 +104,10 @@ def tardigrade_lines(path, mode):
 
 
 ENGINES = {
-    'polars':     Engine(pagerank,    polars_lines,     frozenset({'cse'})),
-    'koala':      Engine(pagerank_kl, koala_lines,      frozenset({'cse', 'batch_size'})),
-    'tardigrade': Engine(pagerank_tg, tardigrade_lines, frozenset({'batch_size'})),
+    'polars':     Engine(pagerank,     polars_lines,     frozenset({'cse'})),
+    'polarbar':   Engine(pagerank_bar, polars_lines,     frozenset({'batch_size'})),
+    'koala':      Engine(pagerank_kl,  koala_lines,      frozenset({'cse', 'batch_size'})),
+    'tardigrade': Engine(pagerank_tg,  tardigrade_lines, frozenset({'batch_size'})),
 }
 
 # A table config is an engine paired with an edge-feeding mode. The table sweeps
@@ -150,6 +157,8 @@ def run_single(mode, path, iterations, engine='polars', cse=True, batch_size=Non
             kwargs['batch_size'] = batch_size
         elif engine == 'tardigrade':
             kwargs['batch_size'] = TARDIGRADE_BATCH_SIZE
+        elif engine == 'polarbar':
+            kwargs['batch_size'] = POLARBAR_BATCH_SIZE
     start = time.time()
     spec.module.pagerank(spec.make_lines(path, mode), **kwargs)
     elapsed = time.time() - start
@@ -250,7 +259,8 @@ if __name__ == '__main__':
                         help='how to feed edges to pagerank (single-run mode)')
     parser.add_argument('--engine', choices=tuple(ENGINES), default='polars',
                         help='which pagerank implementation to run in single-run '
-                             'mode: polars (pagerank.py), koala (pagerank_kl.py) '
+                             'mode: polars (pagerank.py), polarbar '
+                             '(pagerank_bar.py), koala (pagerank_kl.py) '
                              'or tardigrade (pagerank_tg.py)')
     parser.add_argument('--configs', nargs='+', choices=ALL_CONFIGS,
                         default=ALL_CONFIGS, metavar='ENGINE-MODE',
@@ -270,6 +280,8 @@ if __name__ == '__main__':
                              "inner_join's IO source (default: koala's "
                              f'{kl.DEFAULT_BATCH_SIZE:,}). tardigrade: rows per '
                              f'sorted run (default: {TARDIGRADE_BATCH_SIZE:,}). '
+                             'polarbar: pairs per sorted run (default: '
+                             f'{POLARBAR_BATCH_SIZE:,}). '
                              'Smaller caps memory. Ignored by polars.')
     parser.add_argument('--no-cse', action='store_true',
                         help='disable common-subplan elimination in pagerank '
