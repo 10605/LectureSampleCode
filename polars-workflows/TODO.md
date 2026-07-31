@@ -46,19 +46,17 @@ tardigrade-lazy         5.0        11.7        23.9        50.1       106.5     
 
 This is a second koala-like attempt to localize use of polar's memory
 by pulling out joins and group_by operations.  It also doesn't seem to
-work.
+keep memory capped properly.  There may be some simple optimizations
+around the sorting involving use of decode/encode that explain why
+it's slow.
 
-self RSS (MB)    1,250,000   2,000,000   5,000,000
+self RSS (MB)    1,020,000   2,020,000   4,020,000
 --------------------------------------------------
-polarbar-lazy        470.5       662.8      1018.4
+polarbar-lazy        448.2       641.4       850.7
 
-child RSS (MB)   1,250,000   2,000,000   5,000,000
+elapsed (s)      1,020,000   2,020,000   4,020,000
 --------------------------------------------------
-polarbar-lazy          0.0         0.0         0.0
-
-elapsed (s)      1,250,000   2,000,000   5,000,000
---------------------------------------------------
-polarbar-lazy         11.7        20.9        50.3
+polarbar-lazy          8.3        18.7        37.8
 
 
 # TODO
