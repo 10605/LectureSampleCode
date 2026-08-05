@@ -5,6 +5,7 @@ inefficient operations in Polars.
 import ast
 import itertools
 import heapq
+import operator
 import os
 import tempfile
 import weakref
@@ -19,7 +20,11 @@ DecoderFn = Optional[Callable[[str],Any]]
 DEFAULT_ENCODER = repr
 DEFAULT_DECODER = ast.literal_eval
 
-_BY_KEY=lambda kv:kv[0]
+# itemgetter rather than a lambda: these run once per record per pass, and the
+# C-level version skips a Python frame each time.
+_BY_KEY = operator.itemgetter(0)
+_BY_KEY_THEN_SOURCE = operator.itemgetter(0, 1)
+_LINE = operator.itemgetter(1)
 
 #
 # useful aggregator names
@@ -43,27 +48,43 @@ def _pairs_from(input_tsv_path, decode):
             key, val = line.rstrip('\n').split('\t', 1)
             yield decode(key), decode(val)
 
+def _keyed_lines_from(input_tsv_path, decode):
+    """Iterator over (key, line) for a key-value tsv file.
+
+    Only the key is decoded; the line is carried along verbatim, so a sort can
+    move a record from file to file without ever decoding its value or
+    re-encoding either field.  A missing final newline is supplied here, so a
+    line is always safe to write back out as-is.
+    """
+    with open(input_tsv_path) as fp:
+        for line in fp:
+            key = decode(line[:line.index('\t')])
+            yield key, line if line[-1] == '\n' else line + '\n'
+
 class _SortSpillFile:
     """One sorted subset of a set of key-value pairs, written to a temp file.
 
-    Temp file is deleted when unreferenced.  
+    Built from, and iterated as, the (key, line) records of _keyed_lines_from.
+    Temp file is deleted when unreferenced.
     """
-    def __init__(self, batch: Iterable, encode: EncoderFn, decode: DecoderFn):
+    def __init__(self, batch: Iterable, decode: DecoderFn):
         fd, self.name = tempfile.mkstemp(suffix='.spill')
-        self.encode = encode
         self.decode = decode
         with os.fdopen(fd, 'w') as fp:
-            for key, value in sorted(batch, key=_BY_KEY):
-                fp.write(self.encode(key) + '\t' + self.encode(value) + '\n')
+            # sorted() is stable, so equal keys keep their input order
+            fp.writelines(map(_LINE, sorted(batch, key=_BY_KEY)))
         weakref.finalize(self, os.unlink, self.name)
 
     def __iter__(self) -> Iterable:
-        yield from _pairs_from(self.name, self.decode)
+        yield from _keyed_lines_from(self.name, self.decode)
 
 
 class PolarBar:
     
-    def __init__(self, encode: EncoderFn = None, decode: DecoderFn = None, sort_batch_size=1024, sort_fanin=16):
+    # a merge costs only O(log fanin) per record, so a wide fan-in is nearly
+    # free and saves whole read/write passes over the data; the cap is open
+    # file descriptors, one per run in the final merge.
+    def __init__(self, encode: EncoderFn = None, decode: DecoderFn = None, sort_batch_size=1024, sort_fanin=64):
         self.encode = encode or DEFAULT_ENCODER
         self.decode = decode or DEFAULT_DECODER
         self.sort_batch_size = sort_batch_size
@@ -86,18 +107,21 @@ class PolarBar:
 
     def sort_kv_pairs(self, input_tsv_path, output_tsv_path):
         """ Merge-sort key value pairs in the file, only holding sort_batch_size items in memory.
+
+        Records move as whole lines, so each pass costs one key decode per
+        record and no encoding at all.  heapq.merge breaks ties by iterator
+        order, which keeps the sort stable.
         """
-        spill_files = [_SortSpillFile(batch, self.encode, self.decode)
-                       for batch in itertools.batched(_pairs_from(input_tsv_path, self.decode), self.sort_batch_size)]
+        spill_files = [_SortSpillFile(batch, self.decode)
+                       for batch in itertools.batched(_keyed_lines_from(input_tsv_path, self.decode), self.sort_batch_size)]
         while len(spill_files) > self.sort_fanin:
-            spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=_BY_KEY), self.encode, self.decode)
+            spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=_BY_KEY), self.decode)
                            for file_batch in itertools.batched(iter(spill_files), self.sort_fanin)]
         final_sort = heapq.merge(*spill_files, key=_BY_KEY)
 
         # write to the output file
         with open(output_tsv_path, 'w') as fp:
-            for key, val in final_sort:
-                fp.write(self.encode(key) + '\t' + self.encode(val) + '\n') 
+            fp.writelines(map(_LINE, final_sort))
         self._mark_sorted(output_tsv_path)
 
     def group_and_aggregate_by_key(self, input_tsv_path, output_tsv_path, agg: Callable[[Iterable],Any]):
@@ -117,24 +141,20 @@ class PolarBar:
         self._check_sorted(input_tsv_path1)
         self._check_sorted(input_tsv_path2)
 
-        def by_key_then_source(pair):
-            key, (val_src, val) = pair
-            return (key, val_src)
-
         def tag_values(tag, path):
             for key, val in _pairs_from(path, self.decode):
-                yield key, (tag, val)
+                yield key, tag, val
 
         merged_pairs = heapq.merge(
             tag_values('L', input_tsv_path1),
             tag_values('R', input_tsv_path2),
-            key=by_key_then_source)
+            key=_BY_KEY_THEN_SOURCE)
 
         with open(output_tsv_path, 'w') as fp:
             for key, group in itertools.groupby(merged_pairs, key=_BY_KEY):
                 # values from the left come first
                 left = []
-                for _, (val_src, val) in group:
+                for _, val_src, val in group:
                     if val_src == 'L': 
                         left.append(val)
                     else:
