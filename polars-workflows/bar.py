@@ -11,6 +11,8 @@ import tempfile
 import weakref
 import polars as pl
 
+from math import sqrt, ceil
+from tqdm import tqdm
 from typing import Any, Callable, Iterable, Optional
 
 
@@ -112,11 +114,19 @@ class PolarBar:
         record and no encoding at all.  heapq.merge breaks ties by iterator
         order, which keeps the sort stable.
         """
+        print('spilling...')
         spill_files = [_SortSpillFile(batch, self.decode)
-                       for batch in itertools.batched(_keyed_lines_from(input_tsv_path, self.decode), self.sort_batch_size)]
+                       for batch in tqdm(itertools.batched(_keyed_lines_from(input_tsv_path, self.decode), self.sort_batch_size))]
+        
+        if self.sort_fanin < 1:
+            # scale fan_in to finish in one pass
+            self.sort_fanin = ceil(sqrt(len(spill_files)))
+
         while len(spill_files) > self.sort_fanin:
+            print(f'merging {len(spill_files)} files {len(spill_files)/self.sort_fanin} merges')
             spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=_BY_KEY), self.decode)
-                           for file_batch in itertools.batched(iter(spill_files), self.sort_fanin)]
+                           for file_batch in tqdm(itertools.batched(iter(spill_files), self.sort_fanin))]
+        print(f'merging {len(spill_files)} files....')
         final_sort = heapq.merge(*spill_files, key=_BY_KEY)
 
         # write to the output file
