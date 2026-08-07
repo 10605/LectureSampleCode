@@ -11,7 +11,6 @@ trailing newline, and values whose encoding contains a tab or a newline.
 """
 import builtins
 import glob
-import gc
 import itertools
 import os
 import random
@@ -242,14 +241,31 @@ def test_sort_then_dedup_keeps_one_row_per_key(tmp_path):
 # --------------------------------------------------------- resource bounds
 
 def test_spill_files_are_deleted(paths):
-    """Every temp file the sort creates is unlinked once it is unreferenced."""
+    """Every temp directory the sort creates is removed before it returns."""
     in_path, out_path = paths
     write_pairs(in_path, sample_pairs(200))
-    spills = os.path.join(tempfile.gettempdir(), '*.spill')
+    spills = os.path.join(tempfile.gettempdir(), 'spill-*')
     before = set(glob.glob(spills))
 
     bar.PolarBar(sort_batch_size=3, sort_fanin=2).sort_kv_pairs(in_path, out_path)
-    gc.collect()
+
+    assert set(glob.glob(spills)) == before
+
+
+def test_spill_files_are_deleted_even_if_the_sort_raises(paths):
+    """The cleanup is a finally, not a finalizer -- a failure mid-merge still
+    takes the run directories with it."""
+    in_path, out_path = paths
+    write_pairs(in_path, sample_pairs(200))
+    spills = os.path.join(tempfile.gettempdir(), 'spill-*')
+    before = set(glob.glob(spills))
+
+    def explode(_):
+        raise RuntimeError('boom')
+
+    polar_bar = bar.PolarBar(decode=explode, sort_batch_size=3, sort_fanin=2)
+    with pytest.raises(RuntimeError, match='boom'):
+        polar_bar.sort_kv_pairs(in_path, out_path)
 
     assert set(glob.glob(spills)) == before
 

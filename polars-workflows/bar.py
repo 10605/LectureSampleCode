@@ -7,8 +7,8 @@ import itertools
 import heapq
 import operator
 import os
+import shutil
 import tempfile
-import weakref
 import polars as pl
 
 from math import sqrt, ceil
@@ -63,22 +63,42 @@ def _keyed_lines_from(input_tsv_path, decode):
             key = decode(line[:line.index('\t')])
             yield key, line if line[-1] == '\n' else line + '\n'
 
-class _SortSpillFile:
-    """One sorted subset of a set of key-value pairs, written to a temp file.
+class _SpillFileIndex:
+    """One generation of sorted runs: a temp directory, deleted as a unit.
 
-    Built from, and iterated as, the (key, line) records of _keyed_lines_from.
-    Temp file is deleted when unreferenced.
+    Runs hold the (key, line) records of _keyed_lines_from, and are iterated in
+    the order they were added -- which is what keeps the sort stable, since
+    heapq.merge breaks ties by iterator order.  Use it as a context manager, or
+    call close() yourself, to remove the directory.
     """
-    def __init__(self, batch: Iterable, decode: DecoderFn):
-        fd, self.name = tempfile.mkstemp(suffix='.spill')
-        self.decode = decode
-        with os.fdopen(fd, 'w') as fp:
-            # sorted() is stable, so equal keys keep their input order
-            fp.writelines(map(_LINE, sorted(batch, key=_BY_KEY)))
-        weakref.finalize(self, os.unlink, self.name)
+    def __init__(self):
+        self.dir = tempfile.mkdtemp(prefix='spill-')
+        self.names = []
+
+    def add(self, records: Iterable):
+        """Write one run.  The records must ALREADY be in key order: either
+        sorted() in memory, or heapq.merge()d off of earlier runs.
+        """
+        name = os.path.join(self.dir, f'run-{len(self.names):05d}.tsv')
+        with open(name, 'w') as fp:
+            fp.writelines(map(_LINE, records))
+        self.names.append(name)
 
     def __iter__(self) -> Iterable:
-        yield from _keyed_lines_from(self.name, self.decode)
+        return iter(self.names)
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    def close(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+        self.names = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
 
 
 class PolarBar:
@@ -114,24 +134,38 @@ class PolarBar:
         record and no encoding at all.  heapq.merge breaks ties by iterator
         order, which keeps the sort stable.
         """
+        def streams(run_names):
+            return [_keyed_lines_from(name, self.decode) for name in run_names]
+
         print('spilling...')
-        spill_files = [_SortSpillFile(batch, self.decode)
-                       for batch in tqdm(itertools.batched(_keyed_lines_from(input_tsv_path, self.decode), self.sort_batch_size))]
-        
-        if self.sort_fanin < 1:
-            # scale fan_in to finish in one pass
-            self.sort_fanin = ceil(sqrt(len(spill_files)))
+        runs = _SpillFileIndex()
+        try:
+            for batch in tqdm(itertools.batched(
+                    _keyed_lines_from(input_tsv_path, self.decode), self.sort_batch_size)):
+                # sorted() is stable, so equal keys keep their input order
+                runs.add(sorted(batch, key=_BY_KEY))
 
-        while len(spill_files) > self.sort_fanin:
-            print(f'merging {len(spill_files)} files {len(spill_files)/self.sort_fanin} merges')
-            spill_files = [_SortSpillFile(heapq.merge(*file_batch, key=_BY_KEY), self.decode)
-                           for file_batch in tqdm(itertools.batched(iter(spill_files), self.sort_fanin))]
-        print(f'merging {len(spill_files)} files....')
-        final_sort = heapq.merge(*spill_files, key=_BY_KEY)
+            if self.sort_fanin < 1:
+                # scale fan_in to finish in one pass
+                self.sort_fanin = ceil(sqrt(len(runs)))
 
-        # write to the output file
-        with open(output_tsv_path, 'w') as fp:
-            fp.writelines(map(_LINE, final_sort))
+            while len(runs) > self.sort_fanin:
+                print(f'merging {len(runs)} files {len(runs)/self.sort_fanin} merges')
+                merged = _SpillFileIndex()
+                for run_batch in tqdm(itertools.batched(iter(runs), self.sort_fanin)):
+                    merged.add(heapq.merge(*streams(run_batch), key=_BY_KEY))
+                # add() consumed each merge as it went, so this generation is done
+                runs.close()
+                runs = merged
+
+            print(f'merging {len(runs)} files....')
+            final_sort = heapq.merge(*streams(runs), key=_BY_KEY)
+
+            # write to the output file
+            with open(output_tsv_path, 'w') as fp:
+                fp.writelines(map(_LINE, final_sort))
+        finally:
+            runs.close()
         self._mark_sorted(output_tsv_path)
 
     def group_and_aggregate_by_key(self, input_tsv_path, output_tsv_path, agg: Callable[[Iterable],Any]):
