@@ -51,6 +51,10 @@ if __name__ == '__main__':
     parser.add_argument('--fanin', type=int, default=0,
                         help='runs merged at once; 0 scales it to sqrt(#runs) '
                              "(PolarBar's sort_fanin, default: 0)")
+    parser.add_argument('--show_counts', action='store_true',
+                        help='first count the tokens in polars, for comparison; '
+                             'this is the memory-hungry path the rest of the '
+                             'script exists to avoid (>40Gb on full)')
     args = parser.parse_args()
 
     file_name = corpus_path(args.data_dir, args.size, args.split)
@@ -85,7 +89,7 @@ if __name__ == '__main__':
         .select('key', 'val')
     )
     sort_batch_size = args.batch_size
-    if False:
+    if args.show_counts:
         # just the count uses >40Gb here which is quite inefficient
         print(f'counting - {peak_rss_gb()} peak rss gb')
         start = time.time()
@@ -102,28 +106,10 @@ if __name__ == '__main__':
     bar.sink_kv_pairs(df, 'unsort.csv', 'key', 'val')
     print(f'sink {time.time() - start:.4f} sec elapsed')
 
-    # on full:
-    #
-    # (1) 1024*1024 sort_batch_size means about 4 spills/sec and 558
-    # batches so spilling is ~ 2:30 
-
-    # (2) using sqrt(#batches) as fan-in gives 24 merges in first pass
-    # at about 10s/merge so first pass is ~ 3:30, last pass is ~ 6:30
-    # total sort is ~ 9:10
-
-    # didn't track peak_rss_gb - maybe 10Gb? the full files are about
-    # 10Gb. unix sort > 100Gb and is not faster (~ 16:30 +)
-
-    # 10x: should be ~ 5580 spills ~ 30min, ~75 merges 75-way
-    # merges are ~ 30s/merge, run up to 20Gb, first pass was
-    # ~ 40min, second ~ 65min, peaked at ~ 22 Gb.
-
     print(f'sorting - {peak_rss_gb():.4f} peak rss gb')
     start = time.time()
     bar.sort_kv_pairs('unsort.csv', 'sort.csv')
     print(f'sort {time.time() - start:.4f} sec elapsed')
-
-    # grouping is ~ 2min on full, ... ~19m on 10x
 
     print(f'grouping - {peak_rss_gb():.4f} peak rss gb')
     start = time.time()
