@@ -45,21 +45,73 @@ tardigrade-lazy         5.0        11.7        23.9        50.1       106.5     
 ## PolarBar
 
 This is a second koala-like attempt to localize use of polar's memory
-by pulling out joins and group_by operations.  It also doesn't seem to
-keep memory capped properly.  There may be some simple optimizations
-around the sorting involving use of decode/encode that explain why
-it's slow.
+by pulling out joins and group_by operations.  
 
-self RSS (MB)    1,020,000   2,020,000   4,020,000
---------------------------------------------------
-polarbar-lazy        448.2       641.4       850.7
+## Wordcount stress test
 
-elapsed (s)      1,020,000   2,020,000   4,020,000
---------------------------------------------------
-polarbar-lazy          8.3        18.7        37.8
+wordcount_probe.py takes an RCV1 corpus, tokenizes it, and creates
+keyvalue pairs where key is f"{docid}##{label}" and value is a token.
 
+With autoscaling sort fanin, this tracks linearly for time and
+maybe linearly with fanin for space (fanin is ~3x, space is ~5x)
+
+### Full corpus 
+
+On RCV1 full train (~ 1 Gb) with `sort_batch_size=1024**2` and
+autoscaling `sort_fanin=sqrt(num_batches)`
+ performance is
+ * sink ~ 30sec
+ * 558 batches => fanin 24
+ * ~4 spills/sec => spilling ~ 2:30
+ * ~10sec/merge => pass1 is ~ 3:30
+ * pass2 ~ 6:30
+ * overall sort is ~ 9:10 and ~ 4.7 Gb
+
+ * groupby ~ 2min
+
+Unix sort uses > 100 Gb and ~ 16:30 sec
+
+### 10x full corpus 
+
+On RCV1 10x full train (~ 10 Gb) with same params
+ * 5576 batches => fanin 75
+ * ~4 spills/sec => spilling ~ 2:30
+ * ~30sec/merge => pass1 is ~ 40min
+ * pass2 ~ 65min
+ * overall sort is ~ 104min and ~ 22 Gb
+
+ * groupby is ~ 19min
 
 # Logs
+
+## full
+
+```
+bash-3.2$ time py wcprobe.py
+time py wcprobe.py
+loading and tokenizing....
+/Users/wcohen/Documents/code/LectureSampleCode/polars-workflows/wcprobe.py:43: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+  .explode('tokens')
+/Users/wcohen/Documents/code/LectureSampleCode/polars-workflows/wcprobe.py:44: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+  .explode('labels')
+sinking - 0.0593 peak rss gb
+sink 4.2892 sec elapsed
+sorting - 4.7254 peak rss gb
+spilling...
+558it [02:34,  3.60it/s]
+merging 558 files 23.25 merges
+24it [03:28,  8.69s/it]
+merging 24 files....
+sort 551.5618 sec elapsed
+grouping - 9.6319 peak rss gb
+group 112.9995 sec elapsed
+
+real	11m9.067s
+user	11m48.332s
+sys	0m33.634s
+```
+
+## 10x full
 
 ```
 bash-3.2$ time py wcprobe.py
