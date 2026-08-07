@@ -145,14 +145,17 @@ class PolarBar:
                 # sorted() is stable, so equal keys keep their input order
                 runs.add(sorted(batch, key=_BY_KEY))
 
-            if self.sort_fanin < 1:
+            # local, so a sort_fanin of 0 rescales to each sort's own run count
+            # instead of sticking at whatever the first sort happened to need
+            fanin = self.sort_fanin
+            if fanin < 1:
                 # scale fan_in to finish in one pass
-                self.sort_fanin = ceil(sqrt(len(runs)))
+                fanin = ceil(sqrt(len(runs)))
 
-            while len(runs) > self.sort_fanin:
-                print(f'merging {len(runs)} files {len(runs)/self.sort_fanin} merges')
+            while len(runs) > fanin:
+                print(f'merging {len(runs)} files {len(runs)/fanin} merges')
                 merged = _SpillFileIndex()
-                for run_batch in tqdm(itertools.batched(iter(runs), self.sort_fanin)):
+                for run_batch in tqdm(itertools.batched(iter(runs), fanin)):
                     merged.add(heapq.merge(*streams(run_batch), key=_BY_KEY))
                 # add() consumed each merge as it went, so this generation is done
                 runs.close()

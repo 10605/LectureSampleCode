@@ -1,9 +1,28 @@
+import argparse
+import os
 import resource
 import sys
 import time
 
 import polars as pl
 import bar as pb
+
+DEFAULT_DATA_DIR = '../../bigml/data/RCV1'
+
+# the corpora are RCV1.<size>_<split>.txt, except for the combined split,
+# which has no suffix at all: RCV1.<size>.txt
+SIZES = ['very_small', 'small', 'full', '10x']
+SPLITS = ['train', 'test', 'all']
+
+def corpus_path(data_dir, size, split):
+    """Locate one RCV1 corpus.  Not every size/split pair exists (10x is
+    train-only), so fail here rather than deep inside polars.
+    """
+    stem = f'RCV1.{size}' if split == 'all' else f'RCV1.{size}_{split}'
+    path = os.path.join(data_dir, stem + '.txt')
+    if not os.path.exists(path):
+        raise SystemExit(f'no such corpus: {path}')
+    return path
 
 def peak_rss_gb(who=resource.RUSAGE_SELF):
     """Peak resident set size, in MiB.
@@ -17,11 +36,26 @@ def peak_rss_gb(who=resource.RUSAGE_SELF):
     return r / 1024**3 if sys.platform == 'darwin' else r / 1024**2
 
 if __name__ == '__main__':
-    size = '10x'
-    split = 'train'
-    file_name = f'../../bigml/data/RCV1/RCV1.{size}_{split}.txt'
-    
-    print('loading and tokenizing....')
+    parser = argparse.ArgumentParser(
+        description='Time and measure sink/sort/group on an RCV1 corpus.')
+    parser.add_argument('--size', choices=SIZES, default='full',
+                        help='which corpus to read (default: full)')
+    parser.add_argument('--split', choices=SPLITS, default='train',
+                        help="which split to read; 'all' is the combined file "
+                             '(default: train)')
+    parser.add_argument('--data_dir', default=DEFAULT_DATA_DIR,
+                        help=f'where the RCV1 corpora live (default: {DEFAULT_DATA_DIR})')
+    parser.add_argument('--batch_size', type=int, default=1024 * 1024,
+                        help='pairs held in memory per sorted run '
+                             "(PolarBar's sort_batch_size, default: 1048576)")
+    parser.add_argument('--fanin', type=int, default=0,
+                        help='runs merged at once; 0 scales it to sqrt(#runs) '
+                             "(PolarBar's sort_fanin, default: 0)")
+    args = parser.parse_args()
+
+    file_name = corpus_path(args.data_dir, args.size, args.split)
+
+    print(f'loading and tokenizing {file_name} ....')
     line_df = (
         pl.scan_csv(
             file_name,
@@ -50,7 +84,7 @@ if __name__ == '__main__':
             val=pl.col('tokens'))
         .select('key', 'val')
     )
-    sort_batch_size=1024*1024
+    sort_batch_size = args.batch_size
     if False:
         # just the count uses >40Gb here which is quite inefficient
         print(f'counting - {peak_rss_gb()} peak rss gb')
@@ -60,7 +94,8 @@ if __name__ == '__main__':
         print(f'elapsed time {time.time()-start}')
 
 
-    bar = pb.PolarBar(encode=str, decode=lambda x:x, sort_batch_size=sort_batch_size, sort_fanin=0)
+    bar = pb.PolarBar(encode=str, decode=lambda x:x, sort_batch_size=sort_batch_size,
+                      sort_fanin=args.fanin)
 
     print(f'sinking - {peak_rss_gb():.4f} peak rss gb')
     start = time.time()
