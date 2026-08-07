@@ -26,7 +26,7 @@ DEFAULT_DECODER = ast.literal_eval
 # C-level version skips a Python frame each time.
 _BY_KEY = operator.itemgetter(0)
 _BY_KEY_THEN_SOURCE = operator.itemgetter(0, 1)
-_LINE = operator.itemgetter(1)
+_PAIR = operator.itemgetter(1)
 
 #
 # useful aggregator names
@@ -81,7 +81,7 @@ class _SpillFileIndex:
         """
         name = os.path.join(self.dir, f'run-{len(self.names):05d}.tsv')
         with open(name, 'w') as fp:
-            fp.writelines(map(_LINE, records))
+            fp.writelines(map(_PAIR, records))
         self.names.append(name)
 
     def __iter__(self) -> Iterable:
@@ -163,7 +163,7 @@ class PolarBar:
 
             # write to the output file
             with open(output_tsv_path, 'w') as fp:
-                fp.writelines(map(_LINE, final_sort))
+                fp.writelines(map(_PAIR, final_sort))
         finally:
             runs.close()
         self._mark_sorted(output_tsv_path)
