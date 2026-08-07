@@ -59,8 +59,34 @@ elapsed (s)      1,020,000   2,020,000   4,020,000
 polarbar-lazy          8.3        18.7        37.8
 
 
+# Logs
+
+```
+bash-3.2$ time py wcprobe.py
+time py wcprobe.py
+loading and tokenizing....
+/Users/wcohen/Documents/code/LectureSampleCode/polars-workflows/wcprobe.py:43: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+  .explode('tokens')
+/Users/wcohen/Documents/code/LectureSampleCode/polars-workflows/wcprobe.py:44: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+  .explode('labels')
+sinking - 0.0594 peak rss gb
+sink 27.6543 sec elapsed
+sorting - 15.1154 peak rss gb
+spilling...
+5576it [30:45,  3.02it/s]
+merging 5576 files 74.34666666666666 merges
+75it [39:38, 31.72s/it]
+merging 75 files....
+sort 6282.1918 sec elapsed
+grouping - 21.8147 peak rss gb
+group 1135.2172 sec elapsed
+
+real	124m6.238s
+user	128m42.659s
+sys	5m44.929s
+```
+
+
 # TODO
 
  * write mapside joins for tardigrade?
- * could try koala/polars on my laptop I guess to see if polars is
-   using memory "because it can"

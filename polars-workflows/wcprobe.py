@@ -79,16 +79,16 @@ if __name__ == '__main__':
     # didn't track peak_rss_gb - maybe 10Gb? the full files are about
     # 10Gb. unix sort > 100Gb and is not faster (~ 16:30 +)
 
-    # 10x: should be ~ 5580 spills ~ 20-30min, ~75 merges 75-way
-    # merges are ~ 30s/merge, run up to 20Gb, first pass should be
-    # ~ 40min, 
+    # 10x: should be ~ 5580 spills ~ 30min, ~75 merges 75-way
+    # merges are ~ 30s/merge, run up to 20Gb, first pass was
+    # ~ 40min, second ~ 65min, peaked at ~ 22 Gb.
 
     print(f'sorting - {peak_rss_gb():.4f} peak rss gb')
     start = time.time()
     bar.sort_kv_pairs('unsort.csv', 'sort.csv')
     print(f'sort {time.time() - start:.4f} sec elapsed')
 
-    # grouping is ~ 2min
+    # grouping is ~ 2min on full, ... ~19m on 10x
 
     print(f'grouping - {peak_rss_gb():.4f} peak rss gb')
     start = time.time()
