@@ -1,0 +1,642 @@
+<title>Shuffle-Sort In Map-Reduce</title>
+<style>
+  /* ---- tokens: light is the base; both dark states re-declare the same names ---- */
+  :root {
+    --ground:      #eef1f3;
+    --surface:     #fbfcfd;
+    --surface-sunk:#e3e8ec;
+    --line:        #c6d0d8;
+    --line-soft:   #dbe2e8;
+    --ink:         #16222b;
+    --ink-soft:    #4a5b67;
+    --ink-faint:   #7b8b96;
+    --mem:         #0b6a7d;
+    --mem-soft:    #d3e7ec;
+    --disk:        #a4530c;
+    --disk-soft:   #f0dfc9;
+    --w0: #0b6a7d;   /* worker hues -- also the partition (destination) hues */
+    --w1: #a4530c;
+    --w2: #6a3d8f;
+    --w3: #3d6b3a;
+    --tint-col:  8%;   /* how much worker hue sits in a column background */
+    --tint-chip: 22%;  /* ... and in an assigned key chip */
+    --focus:     #a4530c;
+    --shadow:    0 1px 2px rgba(19,38,48,.10), 0 8px 24px -16px rgba(19,38,48,.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0d1519;
+      --surface:     #141f25;
+      --surface-sunk:#0a1216;
+      --line:        #2a3a43;
+      --line-soft:   #1e2c33;
+      --ink:         #e6eef1;
+      --ink-soft:    #a3b4bd;
+      --ink-faint:   #6d818c;
+      --mem:         #4fc0d6;
+      --mem-soft:    #10333c;
+      --disk:        #e09a4d;
+      --disk-soft:   #3a2a15;
+      --w0: #4fc0d6;
+      --w1: #e09a4d;
+      --w2: #b98ae0;
+      --w3: #86c07e;
+      --tint-col:  12%;
+      --tint-chip: 26%;
+      --focus:     #e09a4d;
+      --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0d1519;
+    --surface:     #141f25;
+    --surface-sunk:#0a1216;
+    --line:        #2a3a43;
+    --line-soft:   #1e2c33;
+    --ink:         #e6eef1;
+    --ink-soft:    #a3b4bd;
+    --ink-faint:   #6d818c;
+    --mem:         #4fc0d6;
+    --mem-soft:    #10333c;
+    --disk:        #e09a4d;
+    --disk-soft:   #3a2a15;
+    --w0: #4fc0d6;
+    --w1: #e09a4d;
+    --w2: #b98ae0;
+    --w3: #86c07e;
+    --tint-col:  12%;
+    --tint-chip: 26%;
+    --focus:     #e09a4d;
+    --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+  }
+
+  :root {
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---- masthead ---- */
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--disk); margin: 0 0 6px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4.2vw, 42px);
+    line-height: 1.1; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em;
+  }
+  .standfirst { margin: 0; color: var(--ink-soft); }
+  .standfirst code, footer code, .say code { font-family: var(--mono); font-size: .9em; }
+
+  /* ---- controls ---- */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 22px;
+    margin: 22px 0; padding: 16px 18px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+    box-shadow: var(--shadow);
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field > label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  select { accent-color: var(--mem);
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 8px;
+  }
+  label.check {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 10px 5px 8px;
+  }
+  label.check:hover { border-color: var(--mem); }
+  label.check input { accent-color: var(--mem); margin: 0; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  button {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink); background: var(--surface-sunk);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 8px 13px; cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled) { background: var(--mem-soft); border-color: var(--mem); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--mem); border-color: var(--mem); color: var(--surface); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); background: var(--mem); }
+  button.round { border-color: var(--disk); color: var(--disk); }
+  button.round:hover:not(:disabled) { background: var(--disk-soft); border-color: var(--disk); }
+
+  /* ---- layout ---- */
+  .cols { display: grid; grid-template-columns: minmax(0,1fr) 288px; gap: 26px; align-items: start; }
+  @media (max-width: 940px) { .cols { grid-template-columns: minmax(0,1fr); } }
+  .panel {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 4px; padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .panel + .panel { margin-top: 20px; }
+  .panel > h2 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 10px; font-weight: 500;
+  }
+
+  /* ---- round bar ---- */
+  .roundbar {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+    margin: -4px 0 12px; padding: 8px 11px;
+    background: var(--disk-soft); border: 1px solid var(--disk); border-radius: 3px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+  }
+  .roundbar .r { font-weight: 700; letter-spacing: .04em; }
+  .roundbar .sep { color: var(--disk); }
+  .roundbar .halted { color: var(--ink-soft); }
+  .roundbar.spent { background: var(--surface-sunk); border-color: var(--line); }
+
+  /* ---- the floor ---- */
+  .floor { display: grid; gap: 0; }
+  .cluster { display: grid; grid-template-columns: repeat(var(--k), minmax(0, 1fr)); gap: 12px; }
+
+  .col-head {
+    display: flex; align-items: center; gap: 7px; padding: 7px 10px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+    color: var(--ink); border-bottom: 2px solid var(--w);
+    background: color-mix(in oklab, var(--w) var(--tint-col), var(--surface));
+    border-radius: 3px 3px 0 0;
+  }
+  .col-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--w); flex: none; }
+  .col-head .mod { color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
+
+  .lane {
+    background: color-mix(in oklab, var(--w) var(--tint-col), var(--surface));
+    border: 1px solid color-mix(in oklab, var(--w) 26%, var(--line));
+    border-radius: 3px; padding: 9px; min-height: 46px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .stagerow { padding: 14px 0 4px; border-top: 1px solid var(--line-soft); }
+  .stagerow:first-child { border-top: 0; padding-top: 4px; }
+  .stagerow.pending { display: none; }
+  .stagerow-head {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .stagerow-head .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 17px; height: 17px; border-radius: 50%; font-size: 10px;
+    background: var(--ink-faint); color: var(--surface);
+  }
+  .stagerow.live .stagerow-head { color: var(--ink); }
+  .stagerow.live .stagerow-head .n { background: var(--disk); }
+  .stagerow-head .hint { text-transform: none; letter-spacing: 0; color: var(--ink-faint); }
+
+  /* ---- boxes and chips ---- */
+  .box {
+    background: var(--surface); border: 1px solid var(--line-soft);
+    border-radius: 3px; padding: 6px 7px 7px;
+    transition: transform .3s cubic-bezier(.4,.1,.2,1);
+  }
+  .box.tagged { border-color: color-mix(in oklab, var(--d) 55%, var(--line)); }
+  .box-label {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-faint); margin-bottom: 5px; display: flex; gap: 6px; align-items: center;
+  }
+  .box.tagged .box-label { color: color-mix(in oklab, var(--d) 70%, var(--ink)); }
+  .box-label .arrow { color: var(--d, var(--ink-faint)); font-size: 11px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 3px; }
+  .chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 27px; height: 23px; padding: 0 4px; box-sizing: border-box;
+    font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+    background: var(--surface-sunk); border: 1px solid var(--line-soft);
+    border-radius: 2px; color: var(--ink);
+  }
+  .chip.assigned {
+    background: color-mix(in oklab, var(--d) var(--tint-chip), var(--surface));
+    border-color: color-mix(in oklab, var(--d) 60%, var(--line));
+    color: color-mix(in oklab, var(--d) 72%, var(--ink));
+    font-weight: 600;
+  }
+  .chip.halt {
+    background: transparent; border-style: dashed; color: var(--ink-faint);
+    text-decoration: line-through; text-decoration-thickness: 1px;
+  }
+  .chip.fresh { animation: pop .3s ease-out backwards; }
+  @keyframes pop { from { transform: translateY(-5px) scale(.85); opacity: 0; } to { transform: none; opacity: 1; } }
+  .empty { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  .halted-note {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-faint); margin-top: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .chip.fresh { animation: none; }
+    .box { transition: none; }
+  }
+
+  /* ---- stepper ---- */
+  ol.steps { list-style: none; margin: 0; padding: 0; }
+  ol.steps button {
+    display: block; width: 100%; text-align: left; text-transform: none; letter-spacing: 0;
+    font-family: var(--sans); font-size: 13.5px; background: none; border: 0;
+    border-left: 2px solid var(--line); border-radius: 0;
+    padding: 7px 6px 7px 12px; color: var(--ink-faint);
+  }
+  ol.steps button:hover:not(:disabled) { background: var(--surface-sunk); color: var(--ink-soft); }
+  ol.steps li.done button { color: var(--ink-soft); border-color: var(--ink-faint); }
+  ol.steps li.now button { color: var(--ink); border-color: var(--disk); background: var(--disk-soft); font-weight: 600; }
+  ol.steps .num { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin-right: 8px; }
+  ol.steps li.now .num { color: var(--disk); }
+
+  .say {
+    font-size: 13.5px; color: var(--ink-soft); margin: 12px 0 0;
+    padding-top: 12px; border-top: 1px solid var(--line-soft);
+  }
+  .say b { color: var(--ink); }
+
+  /* ---- population history ---- */
+  .hist { display: flex; align-items: flex-end; gap: 3px; height: 46px; margin: 10px 0 6px; }
+  .hist .bar {
+    flex: 1 1 0; min-width: 5px; background: var(--mem-soft);
+    border: 1px solid var(--mem); border-bottom: 0; border-radius: 2px 2px 0 0;
+  }
+  .hist .bar.now { background: var(--disk-soft); border-color: var(--disk); }
+  .histlab { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+
+  footer {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 15px; line-height: 1.6; color: var(--ink-soft);
+  }
+  .kbd { font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 3px; padding: 1px 5px; color: var(--ink-soft); }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">10-605 · map, partition, shuffle, merge</p>
+  <h1>Shuffle-Sort In Map-Reduce</h1>
+  <p class="standfirst">
+    A map step is embarrassingly parallel — each worker rewrites its
+    own keys and never talks to anyone. The moment those keys have to
+    be <em>grouped</em> so that each worker sees everything in a
+    group, data may need to be moved between workers. That move is the
+    shuffle, and it is the expensive part of MapReduce. Here it is in
+    slow motion, over k workers, with one round of the
+    wondrous-numbers map — <code>n ↦ n/2 if even else 3n+1</code>,
+    emitting nothing once a key falls into the final <code>4 → 2 →
+    1 → 4 ...</code> cycle. 
+  </p>
+</header>
+
+<div class="controls">
+  <div class="field">
+    <label for="k">Workers k</label>
+    <select id="k"><option>2</option><option selected>3</option><option>4</option></select>
+  </div>
+  <div class="field">
+    <label for="rows">Keys per worker</label>
+    <select id="rows"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>12</option></select>
+  </div>
+  <div class="field">
+    <label for="hash">Partition by</label>
+    <label class="check"><input type="checkbox" id="hash"> hash keys</label>
+  </div>
+  <div class="field">
+    <label for="seed">Starting keys</label>
+    <label class="check" title="3 5 6 8 10 16 20 21 40 43">
+      <input type="checkbox" id="seed" checked> seeded</label>
+  </div>
+  <div class="btns">
+    <button id="rewind" title="Back to stage 0 of this round">⏮</button>
+    <button id="back">◀ Back</button>
+    <button id="next" class="primary">Step ▶</button>
+    <button id="cycle" title="Play every stage of this round">▶▶ Run 1x</button>
+    <button id="feed" class="round" title="Copy the merged output back to the input">↻ Feed back</button>
+    <button id="fresh">New data</button>
+  </div>
+</div>
+
+<div class="cols">
+  <div class="panel">
+    <h2>Shuffle sort</h2>
+    <div class="roundbar" id="roundbar"></div>
+    <div class="floor" id="floor"></div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h2>Stages</h2>
+      <ol class="steps" id="steps"></ol>
+      <p class="say" id="say"></p>
+    </div>
+
+    <div class="panel">
+      <h2>Keys still in play</h2>
+      <div class="hist" id="hist"></div>
+      <p class="histlab" id="histlab"></p>
+      <p class="say" id="cost"></p>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <p><strong>The partition function</strong> much be deterministic and
+  balanced.  Every worker must compute the same destination for a key,
+  or the grouping breaks.  You can also have a null hash, so each key
+  is sent to worker <code>key mod k</code>. Why is that a bad choice
+  here?
+  <p><strong>When is data sorted?</strong> Here each worker sorts its
+  own outgoing partitions locally, so the receiver gets k <em>already
+  sorted</em> runs and only has to merge them. This is how Hadoop
+  works but other choices are possible: e.g., data can be sorted after
+  it is received (as in Google's MapReduce) or grouped without a full
+  sort (Spark's approach).</p>
+  <p><strong>What this leaves out.</strong> There's no reducer in this
+  algorithm (and no combiner).  In general the mapper and reducer
+  workers can be distinct and there can differing numbers of them.
+  What would be a reasonable reduce operation for this task? </p>
+  <p style="margin-bottom:0">Keys: <span class="kbd">→</span> next stage · <span class="kbd">←</span> back · <span class="kbd">home</span> rewind · <span class="kbd">R</span> run round · <span class="kbd">F</span> feed back</p>
+</footer>
+</div>
+
+<script>
+"use strict";
+
+const STAGES = [
+  {name: 'Input',              hint: 'worker w holds exactly the keys assigned to w'},
+  {name: 'Map',                hint: 'n ↦ n/2 if even, else 3n+1; halted keys emit nothing'},
+  {name: 'Assign partitions',  hint: 'colour each value by its destination worker'},
+  {name: 'Local partitions',   hint: 'k² boxes: one per (from, to) pair'},
+  {name: 'Sort locally',       hint: 'each outgoing box is sorted'},
+  {name: 'Shuffle',            hint: 'boxes cross to their destination worker'},
+  {name: 'Merge',              hint: 'k sorted runs merged per worker'},
+];
+
+const HALT = new Set([4, 2, 1]);           // the terminal cycle: these keys emit nothing
+const collatz = n => n % 2 === 0 ? n / 2 : 3 * n + 1;
+
+// Knuth multiplicative, avalanched -- enough to hide the map's residue structure
+function hash32(v) {
+  let h = Math.imul(v ^ 0x9e3779b9, 2654435761);
+  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
+  return h >>> 0;
+}
+
+const $ = id => document.getElementById(id);
+let K = 3, PER = 6, HASHED = false, SEEDED = true, STEP = 0, ROUND = 1, TIMER = null;
+let INPUT = [], MAPPED = [], HALTED = [], PARTS = [], MERGED = [], HISTORY = [];
+
+const partOf = v => HASHED ? hash32(v) % K : v % K;
+const partLabel = w => HASHED ? `h(key) = ${w}` : `keys ≡ ${w} (mod ${K})`;
+
+function build() {
+  MAPPED  = INPUT.map(col => col.filter(v => !HALT.has(v)).map(collatz));
+  HALTED  = INPUT.map(col => col.filter(v =>  HALT.has(v)));
+  PARTS   = MAPPED.map(col => Array.from({length: K}, (_, d) => col.filter(v => partOf(v) === d)));
+  MERGED  = Array.from({length: K}, (_, d) => PARTS.map(p => p[d]).flat().sort((a, b) => a - b));
+}
+
+// the bottom six rows of the wondrous-numbers graph in GEB (odd n <= 50, 27's branch omitted)
+const GEB_SEED = [1, 3, 5, 7, 11, 13, 15, 17, 21, 23, 29, 35, 45, 53];
+
+function newData() {
+  const keys = SEEDED ? [...GEB_SEED] : [];
+  const pool = [];
+  for (let v = 2; v < 100; v++) if (!keys.includes(v)) pool.push(v);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  keys.push(...pool.slice(0, Math.max(0, K * PER - keys.length)));
+
+  INPUT = Array.from({length: K}, () => []);
+  // the input already respects the partitioning -- it is a previous round's output
+  // shuffle before dealing, so stage 0 arrives unsorted -- the local sort has visible work to do
+  for (let i = keys.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [keys[i], keys[j]] = [keys[j], keys[i]];
+  }
+  keys.forEach(v => INPUT[partOf(v)].push(v));
+  ROUND = 1; HISTORY = [keys.length];
+  build();
+}
+
+function feedBack() {
+  INPUT = MERGED.map(col => [...col]);
+  ROUND++; HISTORY.push(INPUT.flat().length);
+  build();
+  seek(0);
+}
+
+const alive = () => INPUT.flat().length;
+const halted = () => HALTED.flat().length;
+
+// ------------------------------------------------------------------ render
+const chip = (v, dest, cls) =>
+  `<span class="chip${dest === null ? '' : ' assigned'}${cls ? ' ' + cls : ''}"
+     ${dest === null ? '' : `style="--d: var(--w${dest})"`}>${v}</span>`;
+
+const chips = (vals, destOf, cls) => vals.length
+  ? `<div class="chips">${vals.map(v => chip(v, destOf ? destOf(v) : null, cls)).join('')}</div>`
+  : '<div class="empty">— empty —</div>';
+
+const lane = (w, inner) => `<div class="lane" style="--w: var(--w${w})">${inner}</div>`;
+
+function stageRow(i, inner) {
+  const s = STAGES[i], cls = i === STEP ? 'live' : (i < STEP ? '' : 'pending');
+  return `<div class="stagerow ${cls}">
+      <div class="stagerow-head"><span class="n">${i}</span><span>${s.name}</span>
+        <span class="hint">${s.hint}</span></div>
+      <div class="cluster">${inner}</div>
+    </div>`;
+}
+
+function render(flip) {
+  const before = flip ? boxRects() : null;
+  const assigned = STEP >= 2, sorted = STEP >= 4, shuffled = STEP >= 5;
+  const destOf = assigned ? partOf : null;
+
+  let html = `<div class="cluster">` + INPUT.map((_, w) =>
+    `<div class="col-head" style="--w: var(--w${w})"><span class="dot"></span>Worker ${w}
+       <span class="mod">${partLabel(w)}</span></div>`).join('') + `</div>`;
+
+  html += stageRow(0, INPUT.map((vals, w) => lane(w, chips(vals))).join(''));
+
+  // stage 1: mapped values, plus ghosts for the keys that halted and emitted nothing
+  html += stageRow(1, MAPPED.map((vals, w) => {
+    const ghosts = HALTED[w].length
+      ? chips(HALTED[w], null, 'halt') +
+        `<div class="halted-note">${HALTED[w].length} halted · no output</div>`
+      : '';
+    return lane(w, chips(vals, destOf, STEP === 1 ? 'fresh' : '') + ghosts);
+  }).join(''));
+
+  // stages 3-5 share one row of k² boxes; the shuffle only changes which lane they sit in
+  if (STEP >= 3) {
+    const cells = Array.from({length: K}, () => []);
+    PARTS.forEach((row, from) => row.forEach((vals, to) => {
+      const vs = sorted ? [...vals].sort((a, b) => a - b) : vals;
+      cells[shuffled ? to : from].push(
+        `<div class="box tagged" data-id="${from}-${to}" style="--d: var(--w${to})">
+           <div class="box-label"><span class="arrow">${shuffled ? '↳ from' : '→ to'}</span>
+             worker ${shuffled ? from : to}</div>
+           ${chips(vs, partOf, '')}
+         </div>`);
+    }));
+    html += stageRow(shuffled ? 5 : STEP, cells.map((boxes, w) => lane(w, boxes.join(''))).join(''));
+  }
+
+  if (STEP >= 6) {
+    html += stageRow(6, MERGED.map((vals, w) =>
+      lane(w, `<div class="box" style="--d: var(--w${w})">
+                 <div class="box-label">merged · ${vals.length} keys for worker ${w}</div>
+                 ${chips(vals, partOf, 'fresh')}</div>`)).join(''));
+  }
+
+  $('floor').style.setProperty('--k', K);
+  $('floor').innerHTML = html;
+  if (before) flipBoxes(before);
+
+  renderRoundbar();
+  renderSteps();
+  renderHistory();
+
+  const done = MAPPED.flat().length === 0;
+  $('back').disabled = $('rewind').disabled = STEP === 0;
+  $('next').disabled = STEP === STAGES.length - 1;
+  $('cycle').disabled = done;
+  $('feed').disabled = STEP < 6 || done;
+}
+
+function renderRoundbar() {
+  const spent = MAPPED.flat().length === 0;   // this round emits nothing: the job has converged
+  const bar = $('roundbar');
+  bar.className = 'roundbar' + (spent ? ' spent' : '');
+  bar.innerHTML = spent
+    ? `<span class="r">Round ${ROUND}</span><span class="sep">·</span>
+       <span>every remaining key is in the 4 → 2 → 1 cycle — nothing left to shuffle.</span>`
+    : `<span class="r">Round ${ROUND}</span><span class="sep">·</span>
+       <span>${alive()} keys in play</span><span class="sep">·</span>
+       <span class="halted">${halted()} halt this round</span><span class="sep">·</span>
+       <span class="halted">partition: ${HASHED ? 'hash(key) mod ' + K : 'key mod ' + K}</span>`;
+}
+
+function renderSteps() {
+  const say = [
+    `Worker <b>w</b> holds exactly the keys the partitioner assigns to it — this is the previous round's output, already grouped. Nothing has moved yet.`,
+    `The map runs <b>entirely locally</b>. A key in <code>{4, 2, 1}</code> has halted and emits nothing, so the dataset shrinks; every surviving value has lost its old ownership.`,
+    `Every value is stamped with the worker it now belongs to: <b>${HASHED ? 'hash(value) mod k' : 'value mod k'}</b>. Colour here means destination, not location.`,
+    `Each worker splits its output into <b>k local partitions</b>, one per destination — k² boxes in all. Still no network traffic.` +
+      (HASHED ? '' : ` Empty boxes are structural with this partitioner: <code>3n+1 ≡ 1 (mod 3)</code> for every odd n, so worker 2 can only send to worker 1. Tick the hash box to see the difference.`),
+    `Each outgoing box is sorted <b>before it is sent</b>, so the receiver never has to sort, only merge.`,
+    `The <b>shuffle</b>: every box crosses to its destination worker. This is the only stage that touches the network, and it is all-to-all.`,
+    `Each worker merges the <b>k sorted runs</b> it received into one. The invariant is back — press <b>Feed back</b> to make this the input of round ${ROUND + 1}.`,
+  ];
+  $('steps').innerHTML = STAGES.map((s, i) =>
+    `<li class="${i === STEP ? 'now' : (i < STEP ? 'done' : '')}">
+       <button data-i="${i}"><span class="num">${i}</span>${s.name}</button></li>`).join('');
+  $('steps').querySelectorAll('button').forEach(b => b.onclick = () => { stop(); seek(+b.dataset.i); });
+  $('say').innerHTML = say[STEP];
+}
+
+function renderHistory() {
+  const top = Math.max(...HISTORY, 1);
+  $('hist').innerHTML = HISTORY.map((n, i) =>
+    `<div class="bar${i === HISTORY.length - 1 ? ' now' : ''}"
+       style="height:${Math.max(3, Math.round(100 * n / top))}%" title="round ${i + 1}: ${n} keys"></div>`).join('');
+  $('histlab').textContent = `rounds 1–${HISTORY.length}:  ` + HISTORY.join(' → ');
+
+  const sent = PARTS.reduce((t, row, from) =>
+    t + row.reduce((u, vals, to) => u + (from === to ? 0 : vals.length), 0), 0);
+  const out = MAPPED.flat().length;
+  const boxes = PARTS.flat().filter(b => b.length).length;
+  $('cost').innerHTML = out === 0
+    ? `Nothing was emitted this round — the job has converged.`
+    : (STEP < 5
+      ? `Of the <b>${out}</b> keys this round emits, <b>${sent}</b> must cross the network; the
+         ${out - sent} already sitting on their destination worker stay put.`
+      : `<b>${sent}</b> of ${out} keys crossed the network. <b>${boxes}</b> of the ${K * K} boxes
+         were non-empty${HASHED ? '' : ' — the rest are impossible with a mod-k partitioner'}.`);
+}
+
+// FLIP: measure boxes before the re-render, then animate from their old positions
+function boxRects() {
+  const m = new Map();
+  document.querySelectorAll('.box[data-id]').forEach(b => m.set(b.dataset.id, b.getBoundingClientRect()));
+  return m;
+}
+function flipBoxes(before) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelectorAll('.box[data-id]').forEach(b => {
+    const old = before.get(b.dataset.id);
+    if (!old) return;
+    const now = b.getBoundingClientRect();
+    const dx = old.left - now.left, dy = old.top - now.top;
+    if (!dx && !dy) return;
+    b.style.transition = 'none';
+    b.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => { b.style.transition = ''; b.style.transform = ''; });
+  });
+}
+
+// ------------------------------------------------------------------ driving
+function seek(i) {
+  const wasShuffled = STEP >= 5;
+  const to = Math.max(0, Math.min(STAGES.length - 1, i));
+  const flip = (to >= 5) !== wasShuffled;      // only the shuffle needs boxes to fly
+  STEP = to;
+  render(flip);
+  const live = document.querySelector('.stagerow.live');
+  if (live) live.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+}
+
+function runRound() {
+  if (TIMER) { stop(); return; }
+  seek(0);
+  $('cycle').textContent = '❚❚ Stop';
+  const tick = () => {
+    if (STEP >= STAGES.length - 1) { stop(); return; }
+    seek(STEP + 1);
+    TIMER = setTimeout(tick, 240);
+  };
+  TIMER = setTimeout(tick, 80);
+}
+function stop() {
+  if (TIMER) clearTimeout(TIMER);
+  TIMER = null;
+  $('cycle').textContent = '▶▶ Run 1x';
+}
+
+function reset() {
+  stop();
+  K = +$('k').value; PER = +$('rows').value;
+  HASHED = $('hash').checked; SEEDED = $('seed').checked;
+  newData();
+  seek(0);
+}
+
+$('next').onclick   = () => { stop(); seek(STEP + 1); };
+$('back').onclick   = () => { stop(); seek(STEP - 1); };
+$('rewind').onclick = () => { stop(); seek(0); };
+$('cycle').onclick  = runRound;
+$('feed').onclick   = () => { stop(); feedBack(); };
+$('fresh').onclick  = reset;
+['k', 'rows', 'hash', 'seed'].forEach(id => $(id).onchange = reset);
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowRight')      { e.preventDefault(); stop(); seek(STEP + 1); }
+  if (e.key === 'ArrowLeft')       { e.preventDefault(); stop(); seek(STEP - 1); }
+  if (e.key === 'Home')            { e.preventDefault(); stop(); seek(0); }
+  if (e.key === 'r' || e.key === 'R') runRound();
+  if ((e.key === 'f' || e.key === 'F') && !$('feed').disabled) { stop(); feedBack(); }
+});
+
+reset();
+</script>

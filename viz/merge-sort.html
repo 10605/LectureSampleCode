@@ -1,0 +1,621 @@
+<title>Low-Memory Scalable Merge Sort</title>
+<style>
+  /* ---- tokens: light is the base; both dark states re-declare the same names ---- */
+  :root {
+    --ground:      #eef1f3;
+    --surface:     #fbfcfd;
+    --surface-sunk:#e3e8ec;
+    --line:        #c6d0d8;
+    --line-soft:   #dbe2e8;
+    --ink:         #16222b;
+    --ink-soft:    #4a5b67;
+    --ink-faint:   #7b8b96;
+    --mem:         #0b6a7d;   /* memory / in-RAM work */
+    --mem-soft:    #d3e7ec;
+    --disk:        #a4530c;   /* spilled runs, disk I/O */
+    --disk-soft:   #f0dfc9;
+    --ramp-from:   #cfe3e9;   /* small keys */
+    --ramp-to:     #0a4250;   /* large keys */
+    --ramp-ink-lo: #0d3542;
+    --ramp-ink-hi: #eaf3f5;
+    --focus:       #a4530c;
+    --shadow:      0 1px 2px rgba(19,38,48,.10), 0 8px 24px -16px rgba(19,38,48,.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0d1519;
+      --surface:     #141f25;
+      --surface-sunk:#0a1216;
+      --line:        #2a3a43;
+      --line-soft:   #1e2c33;
+      --ink:         #e6eef1;
+      --ink-soft:    #a3b4bd;
+      --ink-faint:   #6d818c;
+      --mem:         #4fc0d6;
+      --mem-soft:    #10333c;
+      --disk:        #e09a4d;
+      --disk-soft:   #3a2a15;
+      --ramp-from:   #17414d;
+      --ramp-to:     #8fd9e8;
+      --ramp-ink-lo: #d6ecf1;
+      --ramp-ink-hi: #06222a;
+      --focus:       #e09a4d;
+      --shadow:      0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0d1519;
+    --surface:     #141f25;
+    --surface-sunk:#0a1216;
+    --line:        #2a3a43;
+    --line-soft:   #1e2c33;
+    --ink:         #e6eef1;
+    --ink-soft:    #a3b4bd;
+    --ink-faint:   #6d818c;
+    --mem:         #4fc0d6;
+    --mem-soft:    #10333c;
+    --disk:        #e09a4d;
+    --disk-soft:   #3a2a15;
+    --ramp-from:   #17414d;
+    --ramp-to:     #8fd9e8;
+    --ramp-ink-lo: #d6ecf1;
+    --ramp-ink-hi: #06222a;
+    --focus:       #e09a4d;
+    --shadow:      0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+  }
+
+  :root {
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---- masthead ---- */
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--disk); margin: 0 0 6px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4.2vw, 42px);
+    line-height: 1.1; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em;
+  }
+  .standfirst { margin: 0; color: var(--ink-soft); }
+  .standfirst code { font-family: var(--mono); font-size: .88em; color: var(--ink); }
+
+  /* ---- control bar ---- */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 22px;
+    margin: 22px 0; padding: 16px 18px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+    box-shadow: var(--shadow);
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field > label, .legend-title {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  select, input[type="range"] { accent-color: var(--mem); }
+  select {
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 8px;
+  }
+  label.check {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 10px 5px 8px;
+  }
+  label.check:hover { border-color: var(--mem); }
+  label.check input { accent-color: var(--mem); margin: 0; }
+  .btns { display: flex; gap: 8px; margin-left: auto; }
+  button {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink); background: var(--surface-sunk);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 8px 13px; cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled) { background: var(--mem-soft); border-color: var(--mem); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--mem); border-color: var(--mem); color: var(--ramp-ink-hi); font-weight: 600; }
+  button.primary:hover { background: var(--mem); filter: brightness(1.08); }
+
+  /* ---- two-column body ---- */
+  .cols { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 26px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: minmax(0,1fr); } }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 4px; padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .panel + .panel { margin-top: 20px; }
+  .panel > h2 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 4px; font-weight: 500;
+  }
+  .panel .note { margin: 0 0 14px; font-size: 13px; color: var(--ink-soft); max-width: 62ch; }
+
+  /* ---- stage: tiles ---- */
+  .tile {
+    --v: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 26px; height: 24px; padding: 0 3px; box-sizing: border-box;
+    font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums;
+    border-radius: 2px; border: 1px solid rgba(0,0,0,.10);
+    background: color-mix(in oklab, var(--ramp-to) calc(var(--v) * 1%), var(--ramp-from));
+    color: var(--tile-ink, var(--ramp-ink-lo));
+  }
+  .tile.hi { color: var(--ramp-ink-hi); }
+  .tile.blank { background: transparent; border: 1px dashed var(--line); color: var(--ink-faint); }
+  .tile.fresh { animation: pop .28s ease-out; }
+  @keyframes pop {
+    from { transform: translateY(-6px) scale(.86); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { .tile.fresh { animation: none; } }
+
+  .row { display: flex; flex-wrap: wrap; gap: 3px; }
+  .stripscroll { overflow-x: auto; padding-bottom: 4px; }
+
+  /* input stream */
+  .stream { display: flex; gap: 3px; min-width: min-content; }
+  .stream .tile.consumed { opacity: .22; }
+  .stream .tile.next { box-shadow: 0 0 0 2px var(--disk); }
+
+  /* memory buffer */
+  .buffer {
+    display: flex; gap: 4px; padding: 9px 10px; min-width: min-content;
+    background: var(--mem-soft); border: 1px solid var(--mem); border-radius: 3px;
+  }
+
+  /* runs */
+  .gen { border-top: 1px solid var(--line-soft); padding: 11px 0 4px; }
+  .gen:first-child { border-top: 0; }
+  .gen-head {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .gen-head .cost { color: var(--disk); letter-spacing: .04em; text-transform: none; }
+  /* one scrolling lane per pass, like the input file above */
+  .runs { display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; padding-bottom: 5px; }
+  .run {
+    flex: 0 0 auto;
+    display: flex; gap: 2px; padding: 5px 6px; border-radius: 3px;
+    background: var(--surface-sunk); border: 1px solid var(--line-soft);
+  }
+  .run.src   { border-color: var(--disk); background: var(--disk-soft); }
+  .run.dest  { border-color: var(--mem);  background: var(--mem-soft); }
+  .run .tile.spent { opacity: .2; }
+  .run .tile.head  { box-shadow: 0 0 0 2px var(--disk); }
+  .run.dest .tile.head { box-shadow: none; }
+  .run-empty { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); padding: 0 4px; }
+
+  /* ---- status line ---- */
+  .status {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+    border-left: 3px solid var(--disk); padding-left: 10px; min-height: 34px;
+  }
+  .status b { font-weight: 600; }
+  .stagetag {
+    display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px;
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--disk); background: var(--disk-soft); border: 1px solid var(--disk);
+  }
+
+  /* ---- pseudocode ---- */
+  pre.code {
+    font-family: var(--mono); font-size: 12px; line-height: 1.75;
+    margin: 0; white-space: pre; overflow-x: auto; color: var(--ink-soft);
+  }
+  pre.code .ln { display: block; padding: 0 6px; border-radius: 2px; }
+  pre.code .ln.on { background: var(--mem-soft); color: var(--ink); box-shadow: inset 2px 0 0 var(--mem); }
+  pre.code .cmt { color: var(--ink-faint); font-style: italic; }
+
+  /* ---- stats ---- */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 3px; overflow: hidden; }
+  .stat { background: var(--surface); padding: 9px 11px; }
+  .stat dt { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
+  .stat dd { margin: 2px 0 0; font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat dd small { font-size: 11px; color: var(--ink-faint); }
+
+  .legend { display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; color: var(--ink-soft); }
+  .legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
+
+  footer {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 15px; line-height: 1.6; color: var(--ink-soft);
+  }
+  footer code { font-family: var(--mono); font-size: .9em; }
+  .kbd { font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 1px 5px; color: var(--ink-soft); }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">10-605 · sorting data that does not fit in memory</p>
+  <h1>Low-Memory Scalable Merge Sort</h1>
+  <p class="standfirst">
+    Merge sort can be implemented with minimal memory at scale: fill
+    whatever RAM you have, sort that batch, <em>spill</em> it to disk
+    as a sorted <em>run</em>, and then merge runs <em>F</em> at a time
+    until only one run remains.
+  </p>
+</header>
+
+<div class="controls">
+  <div class="field">
+    <label for="n">Records N</label>
+    <select id="n"><option>16</option><option>24</option><option selected>24</option><option>48</option><option>64</option></select>
+  </div>
+  <div class="field">
+    <label for="b">Memory B (rows)</label>
+    <select id="b"><option>2</option><option selected>4</option><option>6</option><option>8</option></select>
+  </div>
+  <div class="field">
+    <label for="f">Merge fan-in F</label>
+    <select id="f"><option selected>3</option><option>3</option><option>4</option><option>8</option></select>
+  </div>
+  <div class="field">
+    <label for="speed">Speed</label>
+    <input id="speed" type="range" min="1" max="20" value="6" style="width:110px">
+  </div>
+  <div class="field">
+    <label for="stagestop">Stop after</label>
+    <label class="check"><input type="checkbox" id="stagestop" checked> each stage</label>
+  </div>
+  <div class="btns">
+    <button id="rewind" title="Back to the start">⏮ Rewind</button>
+    <button id="back" title="Step backward">◀ Back</button>
+    <button id="play" class="primary">▶ Play</button>
+    <button id="step">Step ▶</button>
+    <button id="shuffle">New data</button>
+  </div>
+</div>
+
+<div class="cols">
+  <div>
+    <div class="panel">
+      <h2>Stage</h2>
+      <p class="status" id="status">Ready.</p>
+
+      <div class="field" style="margin-bottom:6px"><label>Input file — read once, left to right</label></div>
+      <div class="stripscroll"><div class="stream" id="stream"></div></div>
+
+      <div class="field" style="margin:16px 0 6px"><label>Memory — holds B rows, never more</label></div>
+      <div class="stripscroll"><div class="buffer" id="buffer"></div></div>
+
+      <div class="field" style="margin:16px 0 6px"><label>Runs on disk</label></div>
+      <div id="gens"></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h2>Where we are in the code</h2>
+      <pre class="code" id="code"></pre>
+    </div>
+
+    <div class="panel">
+      <h2>Cost</h2>
+      <dl class="stats" id="stats"></dl>
+      <p class="note" id="costnote" style="margin:12px 0 0"></p>
+    </div>
+
+    <div class="panel">
+      <h2>Reading the picture</h2>
+      <div class="legend">
+        <div><span class="sw" style="background:var(--mem)"></span>In memory: the buffer, and the run currently being written</div>
+        <div><span class="sw" style="background:var(--disk)"></span>On disk: sorted runs, and the cursor reading each one</div>
+        <div><span class="sw" style="background:linear-gradient(90deg,var(--ramp-from),var(--ramp-to))"></span>Key value, small to large — a sorted run is a clean ramp</div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <p><strong>What to notice.</strong> Memory never holds more than B
+  rows plus one head per open run — the sort is bounded by F, not by
+  N. Every record crosses the disk boundary twice per pass, so the
+  whole cost is <code>2N × (1 + ⌈log<sub>F</sub>(N/B)⌉)</code>
+  record-moves: raising F removes entire passes over the data.  Note
+  that <code>sort_fanin=⌈√runs⌉</code> will lead to a single merge
+  pass. The one thing a bigger F costs is open file descriptors.</p>
+  <p><strong>Stability.</strong> Ties always resolve to the earliest
+  run, and <code>sorted()</code> inside a batch is stable — so equal
+  keys come out in input order, which is what lets a merge join and a
+  group-by trust the order downstream.</p>
+  <p style="margin-bottom:0">Keys: <span class="kbd">space</span> play/pause · <span class="kbd">→</span> step · <span class="kbd">←</span> back · <span class="kbd">home</span> rewind. With <em>stop at every stage boundary</em> checked, Play halts once the spill phase finishes and again after each complete merge pass — one press of Play per stage.</p>
+</footer>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- simulation
+// The trace is built up front, then replayed.  Stepping backward just replays
+// the prefix from scratch -- N is small, so that is cheaper than undo logic.
+
+function buildTrace(data, B, F) {
+  const ev = [];
+  let gen = [];                                   // runs of the current generation
+
+  for (let i = 0; i < data.length; i += B) {      // phase 1: spill sorted runs
+    const batch = data.slice(i, i + B);
+    batch.forEach((v, j) => ev.push({t: 'read', v, i: i + j, slot: j}));
+    const sorted = [...batch].sort((a, b) => a - b);
+    ev.push({t: 'spill', run: sorted});
+    gen.push(sorted);
+  }
+
+  let g = 0;
+  while (gen.length > 1) {                        // phase 2: one merge pass per loop
+    const next = [];
+    for (let s = 0; s < gen.length; s += F) {
+      const group = gen.slice(s, s + F);
+      ev.push({t: 'open', gen: g, from: s, to: s + group.length});
+      const cur = group.map(() => 0), out = [];
+      for (;;) {                                  // k-way merge = repeatedly take the min head
+        let best = -1;
+        for (let k = 0; k < group.length; k++) {
+          if (cur[k] < group[k].length &&
+              (best < 0 || group[k][cur[k]] < group[best][cur[best]])) best = k;
+        }
+        if (best < 0) break;
+        out.push(group[best][cur[best]++]);
+        ev.push({t: 'emit', src: best, v: out[out.length - 1]});
+      }
+      ev.push({t: 'close', run: out});
+      next.push(out);
+    }
+    gen = next; g++;
+  }
+  ev.push({t: 'done'});
+  return markStages(ev);
+}
+
+// A "stage" is the whole spill phase, or one complete merge pass: tag the last
+// event of each so playback can halt there.
+function markStages(ev) {
+  let lastSpill = -1, gen = 0;
+  ev.forEach((e, i) => { if (e.t === 'spill') lastSpill = i; });
+  if (lastSpill >= 0) ev[lastSpill].stage = 'Spill phase done';
+  ev.forEach((e, i) => {
+    if (e.t === 'open') gen = e.gen;
+    if (e.t === 'close') {                       // last close of this generation?
+      const nxt = ev[i + 1];
+      if (!nxt || nxt.t === 'done' || (nxt.t === 'open' && nxt.gen !== gen)) {
+        e.stage = `Merge pass ${gen + 1} done`;
+      }
+    }
+  });
+  return ev;
+}
+
+// ---------------------------------------------------------------- replay
+function freshState() {
+  return {gen: [[]], buffer: [], readTo: 0, active: null, reads: 0, writes: 0,
+          passes: 0, done: false, last: null};
+}
+
+function apply(st, e) {
+  st.last = e;
+  if (e.t === 'read')  { st.buffer.push(e.v); st.readTo = e.i + 1; st.reads++; }
+  if (e.t === 'spill') { st.buffer = []; st.gen[0].push({v: e.run, spent: 0}); st.writes += e.run.length; }
+  if (e.t === 'open')  {
+    if (st.gen.length === e.gen + 1) { st.gen.push([]); st.passes++; }
+    st.active = {gen: e.gen, from: e.from, to: e.to, out: [], src: -1};
+    st.gen[e.gen + 1].push({v: [], spent: 0, open: true});
+  }
+  if (e.t === 'emit')  {
+    const a = st.active, dst = st.gen[a.gen + 1][st.gen[a.gen + 1].length - 1];
+    st.gen[a.gen][a.from + e.src].spent++;
+    dst.v.push(e.v); a.src = e.src;
+    st.reads++; st.writes++;
+  }
+  if (e.t === 'close') {
+    const a = st.active;
+    st.gen[a.gen + 1][st.gen[a.gen + 1].length - 1].open = false;
+    st.active = null;
+  }
+  if (e.t === 'done')  { st.done = true; }
+  return st;
+}
+
+// ---------------------------------------------------------------- pseudocode
+const CODE = [
+  ['h1', "# phase 1 -- spill"],
+  ['read', "for batch in batched(rows, B):"],
+  ['spill', "    runs.add(sorted(batch))"],
+  ['blank', ""],
+  ['h2', "# phase 2 -- merge passes"],
+  ['pass', "while len(runs) > 1:"],
+  ['open', "  for grp in batched(runs, F):"],
+  ['emit', "    out.add(heapq.merge(*grp))"],
+  ['close', "  runs = out"],
+];
+const CODE_FOR = {read: 'read', spill: 'spill', open: 'open', emit: 'emit', close: 'close', done: null};
+
+// ---------------------------------------------------------------- rendering
+const $ = id => document.getElementById(id);
+let DATA = [], TRACE = [], POS = 0, ST = freshState(), TIMER = null, MAXV = 100;
+
+function tile(v, cls) {
+  const pct = Math.round(100 * v / MAXV);
+  const hi = pct > 55 ? ' hi' : '';
+  return `<span class="tile${hi}${cls ? ' ' + cls : ''}" style="--v:${pct}">${v}</span>`;
+}
+
+// Each lane scrolls on its own, so nudge the part being worked on into view --
+// the growing output run first, else the run being read, else the read cursor.
+function keepVisible() {
+  document.querySelectorAll('.runs, .stripscroll').forEach(lane => {
+    const t = lane.querySelector('.dest, .src, .next');
+    if (!t) return;
+    // the read cursor gets a few tiles of lookahead; a run just needs its tail on screen
+    const pad = t.classList.contains('next') ? 96 : 8;
+    const l = lane.getBoundingClientRect(), r = t.getBoundingClientRect();
+    if (r.right + pad > l.right)     lane.scrollLeft += r.right + pad - l.right;
+    else if (r.left - pad < l.left)  lane.scrollLeft -= l.left - r.left + pad;
+  });
+}
+
+function render() {
+  const st = ST, e = st.last || {};
+
+  // input stream
+  $('stream').innerHTML = DATA.map((v, i) =>
+    tile(v, i < st.readTo ? 'consumed' : (i === st.readTo && !st.done ? 'next' : ''))).join('');
+
+  // memory buffer: B slots, filled then blank
+  const B = +$('b').value;
+  let buf = '';
+  for (let i = 0; i < B; i++) {
+    buf += i < st.buffer.length
+      ? tile(st.buffer[i], i === st.buffer.length - 1 && e.t === 'read' ? 'fresh' : '')
+      : '<span class="tile blank">·</span>';
+  }
+  $('buffer').innerHTML = buf;
+
+  // runs, one row per generation
+  const a = st.active;
+  $('gens').innerHTML = st.gen.map((runs, g) => {
+    if (!runs.length) return '';
+    const label = g === 0 ? 'Pass 0 — spilled from memory' : `Pass ${g} — merged ${g === 1 ? 'from pass 0' : 'from pass ' + (g - 1)}`;
+    const rows = runs.map((r, i) => {
+      const isSrc = a && a.gen === g && i >= a.from && i < a.to;
+      const isDst = a && a.gen + 1 === g && i === runs.length - 1;
+      const cls = isSrc ? 'src' : (isDst ? 'dest' : '');
+      const body = r.v.length === 0
+        ? '<span class="run-empty">empty</span>'
+        : r.v.map((v, j) => {
+            if (isSrc) return tile(v, j < r.spent ? 'spent' : (j === r.spent ? 'head' : ''));
+            if (isDst) return tile(v, j === r.v.length - 1 && e.t === 'emit' ? 'fresh' : '');
+            return tile(v);
+          }).join('');
+      return `<div class="run ${cls}">${body}</div>`;
+    }).join('');
+    const n = runs.reduce((s, r) => s + r.v.length, 0);
+    return `<div class="gen"><div class="gen-head"><span>${label}</span>
+      <span class="cost">${runs.length} run${runs.length === 1 ? '' : 's'} · ${n} rows</span></div>
+      <div class="runs">${rows}</div></div>`;
+  }).join('');
+
+  // status line
+  const msg = {
+    read:  () => `Reading key <b>${e.v}</b> into memory — slot ${e.slot + 1} of ${B}.`,
+    spill: () => `Buffer full: sorted <b>${e.run.length}</b> rows and spilled them as run ${st.gen[0].length}. Memory is free again.`,
+    open:  () => `Opening a merge of runs ${a.from + 1}–${a.to} from pass ${a.gen}. Memory holds one head row per run.`,
+    emit:  () => `Smallest head is <b>${e.v}</b> (run ${a.from + e.src + 1}) — appended to the output run.`,
+    close: () => `Output run complete: <b>${e.run.length}</b> rows.`,
+    done:  () => `<b>Sorted.</b> ${DATA.length} rows, ${st.passes + 1} pass${st.passes ? 'es' : ''} over the data, never more than ${B} rows in memory.`
+  }[e.t];
+  $('status').innerHTML = (msg ? msg() : 'Ready. Press Step or Play.') +
+    (e.stage && e.t !== 'done' ? ` <span class="stagetag">${e.stage}</span>` : '');
+
+  // pseudocode highlight
+  const hot = CODE_FOR[e.t];
+  $('code').innerHTML = CODE.map(([k, txt]) => {
+    const on = k === hot || (k === 'pass' && (e.t === 'open' || e.t === 'emit' || e.t === 'close'));
+    const t = txt.startsWith('#') ? `<span class="cmt">${txt}</span>` : txt;
+    return `<span class="ln${on ? ' on' : ''}">${t || '&nbsp;'}</span>`;
+  }).join('');
+
+  // cost panel
+  const N = DATA.length, F = +$('f').value;
+  const mergePasses = Math.ceil(Math.log(Math.ceil(N / B)) / Math.log(F));
+  $('stats').innerHTML = `
+    <div class="stat"><dt>Rows read</dt><dd>${st.reads}</dd></div>
+    <div class="stat"><dt>Rows written</dt><dd>${st.writes}</dd></div>
+    <div class="stat"><dt>Passes done</dt><dd>${st.passes + (st.gen[0].length ? 1 : 0)}<small> / ${1 + mergePasses}</small></dd></div>
+    <div class="stat"><dt>Rows in memory</dt><dd>${st.active ? (a.to - a.from) : st.buffer.length}<small> / ${B}</small></dd></div>`;
+  $('costnote').innerHTML =
+    `⌈N/B⌉ = <b>${Math.ceil(N / B)}</b> runs, merged ${F} at a time ⇒ ` +
+    `<b>${mergePasses}</b> merge pass${mergePasses === 1 ? '' : 'es'} after the spill. ` +
+    `Total record-moves ≈ 2N·(1+⌈log<sub>F</sub>⌈N/B⌉⌉) = <b>${2 * N * (1 + mergePasses)}</b>.`;
+
+  keepVisible();
+
+  $('back').disabled = $('rewind').disabled = POS === 0;
+  $('step').disabled = POS >= TRACE.length;
+  $('play').disabled = POS >= TRACE.length;
+}
+
+function seek(pos) {
+  POS = Math.max(0, Math.min(TRACE.length, pos));
+  ST = freshState();
+  for (let i = 0; i < POS; i++) apply(ST, TRACE[i]);
+  render();
+}
+
+function step() {
+  if (POS >= TRACE.length) { pause(); return; }
+  apply(ST, TRACE[POS++]);
+  render();
+  if (POS >= TRACE.length) pause();
+}
+
+function play() {
+  if (TIMER) return;
+  const ms = () => 1000 / +$('speed').value;
+  const tick = () => {
+    step();
+    // halt on a stage boundary, but only once we have moved off it
+    if (TIMER && $('stagestop').checked && TRACE[POS - 1] && TRACE[POS - 1].stage) { pause(); return; }
+    if (TIMER) { clearTimeout(TIMER); TIMER = setTimeout(tick, ms()); }
+  };
+  TIMER = setTimeout(tick, 0);
+  $('play').textContent = '❚❚ Pause';
+}
+function pause() {
+  if (TIMER) clearTimeout(TIMER);
+  TIMER = null;
+  $('play').textContent = '▶ Play';
+}
+
+function reset(newData) {
+  pause();
+  const N = +$('n').value, B = +$('b').value, F = +$('f').value;
+  if (newData || DATA.length !== N) {
+    const pool = Array.from({length: 99}, (_, i) => i + 1);
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    DATA = pool.slice(0, N);
+  }
+  MAXV = Math.max(...DATA);
+  TRACE = buildTrace(DATA, B, F);
+  seek(0);
+}
+
+$('play').onclick = () => TIMER ? pause() : play();
+$('step').onclick = () => { pause(); step(); };
+$('back').onclick = () => { pause(); seek(POS - 1); };
+$('rewind').onclick = () => { pause(); seek(0); };
+$('shuffle').onclick = () => reset(true);
+['n', 'b', 'f'].forEach(id => $(id).onchange = () => reset(id === 'n'));
+document.addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'SELECT' || ev.target.tagName === 'INPUT') return;
+  if (ev.key === ' ')          { ev.preventDefault(); TIMER ? pause() : play(); }
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); pause(); step(); }
+  if (ev.key === 'ArrowLeft')  { ev.preventDefault(); pause(); seek(POS - 1); }
+  if (ev.key === 'Home')       { ev.preventDefault(); pause(); seek(0); }
+});
+
+reset(true);
+</script>
