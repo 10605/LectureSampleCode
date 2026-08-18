@@ -1,9 +1,12 @@
-import collections
 from collections.abc import Iterator
-import subprocess
+import itertools
+import operator
 import os
 
+import merge_sort
 import reduce_util as ru
+
+_BY_KEY = operator.itemgetter(0)
 
 class Worker:
 
@@ -52,21 +55,19 @@ class Worker:
                 for key, value in self.map(line):
                     fp.write(ru.kv_to_line(key, value))
 
-        # sort the map output
-        command = (f'LC_ALL=C sort -k1'
-                   + f' -o {sort_output_buf} {sort_input_buf}')
-        subprocess.check_call(command, shell=True)
+        # sort the map output, holding only a batch of it in memory
+        merge_sort.merge_sort_file(sort_input_buf, sort_output_buf)
 
         # create a generator for the sorted pairs 
         def pair_generator():
             for line in open(sort_output_buf):
                 yield ru.kv_from_line(line)
 
-        # convert pair_generator and invoke and save reduce outputs
+        # group the sorted pairs by key and invoke and save reduce outputs
         with open(dst, 'w') as fp:
-            for key, values in ru.ReduceReady(pair_generator()):
+            for key, group in itertools.groupby(pair_generator(), key=_BY_KEY):
+                values = (value for _, value in group)
                 for reduced_value in self.reduce(key, values):
                     pair = (key, reduced_value)
                     fp.write(str(pair) + '\n')
         
-
