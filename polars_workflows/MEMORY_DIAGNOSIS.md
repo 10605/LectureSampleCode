@@ -93,6 +93,6 @@ bug in the pagerank formulation.
 ## How to reproduce
 
 ```
-cd polars-workflows
+cd polars_workflows
 python demo_memory.py --nodes 20000 --edges 1000000 2000000 4000000 --iterations 10
 ```
