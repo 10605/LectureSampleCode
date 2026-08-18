@@ -1,0 +1,5 @@
+# probe outputs: these get very large -- sort.csv and unsort.csv have been
+# over 100Gb -- and nothing here is worth versioning
+*.csv
+__pycache__/
+*.py~
