@@ -9,7 +9,7 @@ if __name__ == '__main__':
 
     freq = Counter()
     for line in open('../data/brown_nolines.txt'):
-        for word in re.findall('\w+', line.strip().lower()):
+        for word in re.findall(r'\w+', line.strip().lower()):
             freq[word] += 1
 
 

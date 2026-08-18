@@ -1,12 +1,24 @@
 from collections.abc import Iterator
+import json
 import itertools
 import operator
 import os
 
 import merge_sort
-import reduce_util as ru
 
 _BY_KEY = operator.itemgetter(0)
+
+def kv_to_line(key, value) -> str:
+    """Convert a key-value pair into a sortable line.
+    """
+    return json.dumps(key) + '\t' + json.dumps(value) + '\n'
+
+def kv_from_line(line: str) -> tuple:
+    """Convert a sortable line back a key-value pair.
+    """
+    str_key, str_value = line.rstrip().split('\t')
+    return json.loads(str_key), json.loads(str_value)
+    
 
 class Worker:
 
@@ -53,7 +65,7 @@ class Worker:
         with open(sort_input_buf, 'w') as fp:
             for line in open(src):
                 for key, value in self.map(line):
-                    fp.write(ru.kv_to_line(key, value))
+                    fp.write(kv_to_line(key, value))
 
         # sort the map output, holding only a batch of it in memory
         merge_sort.merge_sort_file(sort_input_buf, sort_output_buf)
@@ -61,7 +73,7 @@ class Worker:
         # create a generator for the sorted pairs 
         def pair_generator():
             for line in open(sort_output_buf):
-                yield ru.kv_from_line(line)
+                yield kv_from_line(line)
 
         # group the sorted pairs by key and invoke and save reduce outputs
         with open(dst, 'w') as fp:
