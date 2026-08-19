@@ -1,0 +1,661 @@
+<title>Word Count In Map-Reduce</title>
+<style>
+  /* ---- tokens: light is the base; both dark states re-declare the same names ---- */
+  :root {
+    --ground:      #eef1f3;
+    --surface:     #fbfcfd;
+    --surface-sunk:#e3e8ec;
+    --line:        #c6d0d8;
+    --line-soft:   #dbe2e8;
+    --ink:         #16222b;
+    --ink-soft:    #4a5b67;
+    --ink-faint:   #7b8b96;
+    --mem:         #0b6a7d;
+    --mem-soft:    #d3e7ec;
+    --disk:        #a4530c;
+    --disk-soft:   #f0dfc9;
+    --w0: #0b6a7d;   /* worker hues -- also the partition (destination) hues */
+    --w1: #a4530c;
+    --w2: #6a3d8f;
+    --w3: #3d6b3a;
+    --tint-col:  8%;   /* how much worker hue sits in a column background */
+    --tint-chip: 22%;  /* ... and in an assigned key chip */
+    --focus:     #a4530c;
+    --shadow:    0 1px 2px rgba(19,38,48,.10), 0 8px 24px -16px rgba(19,38,48,.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0d1519;
+      --surface:     #141f25;
+      --surface-sunk:#0a1216;
+      --line:        #2a3a43;
+      --line-soft:   #1e2c33;
+      --ink:         #e6eef1;
+      --ink-soft:    #a3b4bd;
+      --ink-faint:   #6d818c;
+      --mem:         #4fc0d6;
+      --mem-soft:    #10333c;
+      --disk:        #e09a4d;
+      --disk-soft:   #3a2a15;
+      --w0: #4fc0d6;
+      --w1: #e09a4d;
+      --w2: #b98ae0;
+      --w3: #86c07e;
+      --tint-col:  12%;
+      --tint-chip: 26%;
+      --focus:     #e09a4d;
+      --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0d1519;
+    --surface:     #141f25;
+    --surface-sunk:#0a1216;
+    --line:        #2a3a43;
+    --line-soft:   #1e2c33;
+    --ink:         #e6eef1;
+    --ink-soft:    #a3b4bd;
+    --ink-faint:   #6d818c;
+    --mem:         #4fc0d6;
+    --mem-soft:    #10333c;
+    --disk:        #e09a4d;
+    --disk-soft:   #3a2a15;
+    --w0: #4fc0d6;
+    --w1: #e09a4d;
+    --w2: #b98ae0;
+    --w3: #86c07e;
+    --tint-col:  12%;
+    --tint-chip: 26%;
+    --focus:     #e09a4d;
+    --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+  }
+
+  :root {
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---- masthead ---- */
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--disk); margin: 0 0 6px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4.2vw, 42px);
+    line-height: 1.1; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em;
+  }
+  .standfirst { margin: 0; color: var(--ink-soft); }
+  .standfirst code, footer code, .say code { font-family: var(--mono); font-size: .9em; }
+
+  /* ---- controls ---- */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 22px;
+    margin: 22px 0; padding: 16px 18px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+    box-shadow: var(--shadow);
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field > label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  select { accent-color: var(--mem);
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 8px;
+  }
+  label.check {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 10px 5px 8px;
+  }
+  label.check:hover { border-color: var(--mem); }
+  label.check input { accent-color: var(--mem); margin: 0; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  button {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink); background: var(--surface-sunk);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 8px 13px; cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled) { background: var(--mem-soft); border-color: var(--mem); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--mem); border-color: var(--mem); color: var(--surface); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); background: var(--mem); }
+
+  /* ---- layout ---- */
+  .cols { display: grid; grid-template-columns: minmax(0,1fr) 288px; gap: 26px; align-items: start; }
+  @media (max-width: 940px) { .cols { grid-template-columns: minmax(0,1fr); } }
+  .panel {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 4px; padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .panel + .panel { margin-top: 20px; }
+  .panel > h2 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 10px; font-weight: 500;
+  }
+
+  /* ---- corpus editor ---- */
+  textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 92px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.7; color: var(--ink);
+    background: var(--surface-sunk); border: 1px solid var(--line); border-radius: 3px;
+    padding: 8px 10px;
+  }
+
+  /* ---- status bar ---- */
+  .roundbar {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+    margin: -4px 0 12px; padding: 8px 11px;
+    background: var(--disk-soft); border: 1px solid var(--disk); border-radius: 3px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+  }
+  .roundbar .r { font-weight: 700; letter-spacing: .04em; }
+  .roundbar .sep { color: var(--disk); }
+  .roundbar .dim { color: var(--ink-soft); }
+
+  /* ---- the floor ---- */
+  .floor { display: grid; gap: 0; }
+  .cluster { display: grid; grid-template-columns: repeat(var(--k), minmax(0, 1fr)); gap: 12px; }
+
+  .col-head {
+    display: flex; align-items: center; gap: 7px; padding: 7px 10px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+    color: var(--ink); border-bottom: 2px solid var(--w);
+    background: color-mix(in oklab, var(--w) var(--tint-col), var(--surface));
+    border-radius: 3px 3px 0 0;
+  }
+  .col-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--w); flex: none; }
+  .col-head .mod { color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
+
+  .lane {
+    background: color-mix(in oklab, var(--w) var(--tint-col), var(--surface));
+    border: 1px solid color-mix(in oklab, var(--w) 26%, var(--line));
+    border-radius: 3px; padding: 9px; min-height: 46px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .stagerow { padding: 14px 0 4px; border-top: 1px solid var(--line-soft); }
+  .stagerow:first-child { border-top: 0; padding-top: 4px; }
+  .stagerow-head {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .stagerow-head .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 17px; height: 17px; border-radius: 50%; font-size: 10px;
+    background: var(--ink-faint); color: var(--surface);
+  }
+  .stagerow.live .stagerow-head { color: var(--ink); }
+  .stagerow.live .stagerow-head .n { background: var(--disk); }
+  .stagerow-head .hint { text-transform: none; letter-spacing: 0; color: var(--ink-faint); }
+
+  /* ---- boxes and chips ---- */
+  .box {
+    background: var(--surface); border: 1px solid var(--line-soft);
+    border-radius: 3px; padding: 6px 7px 7px;
+    transition: transform .3s cubic-bezier(.4,.1,.2,1);
+  }
+  .box.tagged { border-color: color-mix(in oklab, var(--d) 55%, var(--line)); }
+  .box-label {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-faint); margin-bottom: 5px; display: flex; gap: 6px; align-items: center;
+  }
+  .box.tagged .box-label { color: color-mix(in oklab, var(--d) 70%, var(--ink)); }
+  .box-label .arrow { color: var(--d, var(--ink-faint)); font-size: 11px; }
+  .doc { font-family: var(--serif); font-size: 14px; color: var(--ink); }
+  .chips { display: flex; flex-wrap: wrap; gap: 3px; }
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 3px;
+    height: 23px; padding: 0 6px; box-sizing: border-box;
+    font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+    background: var(--surface-sunk); border: 1px solid var(--line-soft);
+    border-radius: 2px; color: var(--ink);
+  }
+  .chip .c { color: var(--ink-faint); }
+  .chip.assigned {
+    background: color-mix(in oklab, var(--d) var(--tint-chip), var(--surface));
+    border-color: color-mix(in oklab, var(--d) 60%, var(--line));
+    color: color-mix(in oklab, var(--d) 72%, var(--ink));
+    font-weight: 600;
+  }
+  .chip.assigned .c { color: color-mix(in oklab, var(--d) 55%, var(--ink-soft)); }
+  .chip.merged .c { font-weight: 700; color: inherit; }
+  .chip.fresh { animation: pop .3s ease-out backwards; }
+  @keyframes pop { from { transform: translateY(-5px) scale(.85); opacity: 0; } to { transform: none; opacity: 1; } }
+  .empty { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  @media (prefers-reduced-motion: reduce) {
+    .chip.fresh { animation: none; }
+    .box { transition: none; }
+  }
+
+  /* ---- stepper ---- */
+  ol.steps { list-style: none; margin: 0; padding: 0; }
+  ol.steps button {
+    display: block; width: 100%; text-align: left; text-transform: none; letter-spacing: 0;
+    font-family: var(--sans); font-size: 13.5px; background: none; border: 0;
+    border-left: 2px solid var(--line); border-radius: 0;
+    padding: 7px 6px 7px 12px; color: var(--ink-faint);
+  }
+  ol.steps button:hover:not(:disabled) { background: var(--surface-sunk); color: var(--ink-soft); }
+  ol.steps li.done button { color: var(--ink-soft); border-color: var(--ink-faint); }
+  ol.steps li.now button { color: var(--ink); border-color: var(--disk); background: var(--disk-soft); font-weight: 600; }
+  ol.steps .num { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin-right: 8px; }
+  ol.steps li.now .num { color: var(--disk); }
+
+  .say {
+    font-size: 13.5px; color: var(--ink-soft); margin: 12px 0 0;
+    padding-top: 12px; border-top: 1px solid var(--line-soft);
+  }
+  .say b { color: var(--ink); }
+
+  /* ---- reducer load ---- */
+  .load { display: grid; gap: 6px; margin: 4px 0 6px; }
+  .load .row { display: grid; grid-template-columns: 62px minmax(0,1fr) 30px; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  .load .track { height: 12px; background: var(--surface-sunk); border: 1px solid var(--line-soft); border-radius: 2px; }
+  .load .fill { height: 100%; background: color-mix(in oklab, var(--w) 45%, var(--surface)); border-right: 1px solid var(--w); }
+  .load .n { text-align: right; color: var(--ink); }
+  .histlab { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin: 0; }
+
+  footer {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 15px; line-height: 1.6; color: var(--ink-soft);
+  }
+  .kbd { font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 3px; padding: 1px 5px; color: var(--ink-soft); }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">10-605 · map, combine, partition, shuffle, reduce</p>
+  <h1>Word Count In Map-Reduce</h1>
+  <p class="standfirst">
+    Word count is the <em>Hello, world</em> of MapReduce, and it is
+    also the smallest program in which every interesting part of the
+    system shows up. The map — <code>document ↦ (word, 1) for each
+    token</code> — is embarrassingly parallel: no worker needs to see
+    another worker's documents. But the sum for <code>toast</code>
+    cannot be computed until every <code>(toast, 1)</code> in the
+    corpus sits on one machine, and that gathering is the shuffle.
+    Here it is in slow motion over a four-document corpus, with a
+    combiner you can switch on and a partitioner you can make bad.
+  </p>
+</header>
+
+<div class="controls">
+  <div class="field">
+    <label for="k">Workers k</label>
+    <select id="k"><option>2</option><option selected>3</option><option>4</option></select>
+  </div>
+  <div class="field">
+    <label for="hash">Partition by</label>
+    <label class="check"><input type="checkbox" id="hash"> hash words</label>
+  </div>
+  <div class="field">
+    <label for="comb">Combiner</label>
+    <label class="check" title="Sum duplicate words on the mapper, before the shuffle">
+      <input type="checkbox" id="comb"> combine locally</label>
+  </div>
+  <div class="btns">
+    <button id="rewind" title="Back to stage 0">⏮</button>
+    <button id="back">◀ Back</button>
+    <button id="next" class="primary">Step ▶</button>
+    <button id="cycle" title="Play every stage">▶▶ Run</button>
+    <button id="fresh">Reset corpus</button>
+  </div>
+</div>
+
+<div class="cols">
+  <div class="panel">
+    <h2>Shuffle sort</h2>
+    <div class="roundbar" id="roundbar"></div>
+    <div class="floor" id="floor"></div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h2>Stages</h2>
+      <ol class="steps" id="steps"></ol>
+      <p class="say" id="say"></p>
+    </div>
+
+    <div class="panel">
+      <h2>Reducer load</h2>
+      <div class="load" id="load"></div>
+      <p class="histlab" id="loadlab"></p>
+      <p class="say" id="cost"></p>
+    </div>
+
+    <div class="panel">
+      <h2>Corpus · one document per line</h2>
+      <textarea id="corpus" spellcheck="false"></textarea>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <p><strong>The partition function</strong> must be deterministic and
+  balanced. Every mapper must compute the same destination for a word,
+  or the grouping breaks and <code>toast</code> gets counted twice. The
+  default here is the naive choice — send a word to worker
+  <code>(first letter) mod k</code>. It is deterministic, so it is
+  correct; look at the reducer load and say why it is still a bad
+  choice, and what happens to it on a real English corpus.</p>
+  <p><strong>The combiner</strong> is a reducer that runs on the
+  mapper, on that mapper's output only. Switch it on and watch the
+  number of pairs crossing the network fall. It is legal here because
+  addition is associative and commutative — a combiner is an
+  <em>optimization the framework may run zero, one, or many times</em>,
+  so a job whose answer depends on it running is a buggy job. Which of
+  these reducers could not be used as its own combiner: sum, max,
+  count-distinct, mean?</p>
+  <p><strong>When is data sorted?</strong> Each worker sorts its own
+  outgoing partitions locally, so the receiver gets k <em>already
+  sorted</em> runs and only has to merge them — and after the merge,
+  every occurrence of a word is adjacent, which is exactly the input
+  the reducer wants. This is how Hadoop works; Google's MapReduce sorts
+  after receiving, and Spark can group without a full sort.</p>
+  <p style="margin-bottom:0">Keys: <span class="kbd">→</span> next stage · <span class="kbd">←</span> back · <span class="kbd">home</span> rewind · <span class="kbd">R</span> run</p>
+</footer>
+</div>
+
+<script>
+"use strict";
+
+const DEFAULT_CORPUS = [
+  'Didi likes toast',
+  'Jane likes toast with jam',
+  'Joe burnt the toast',
+  'I dislike burnt toast',
+].join('\n');
+
+// Knuth multiplicative over the word's characters, avalanched
+function hash32(s) {
+  let h = 0x9e3779b9;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 2654435761);
+  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
+  return h >>> 0;
+}
+
+const $ = id => document.getElementById(id);
+let K = 3, HASHED = false, COMBINE = false, STEP = 0, TIMER = null;
+let DOCS = [], SLICES = [], MAPPED = [], EMITTED = [], PARTS = [], MERGED = [], REDUCED = [], STAGES = [];
+
+const partOf = w => HASHED ? hash32(w) % K : (w.charCodeAt(0) - 97) % K;
+const partLabel = d => HASHED ? `h(word) = ${d}` : `1st letter ≡ ${d} (mod ${K})`;
+const byWord = (a, b) => a.w < b.w ? -1 : a.w > b.w ? 1 : 0;
+
+// (word, n) pairs summed by word, kept in first-seen order
+function sumByWord(pairs) {
+  const m = new Map();
+  pairs.forEach(p => m.set(p.w, (m.get(p.w) || 0) + p.c));
+  return [...m].map(([w, c]) => ({w, c}));
+}
+
+const at = name => STAGES.findIndex(s => s.name === name);
+
+function buildStages() {
+  STAGES = [
+    {name: 'Input',             hint: 'worker w holds its own slice of the corpus'},
+    {name: 'Map',               hint: 'every token emits the pair (word, 1)'},
+    ...(COMBINE ? [{name: 'Combine', hint: 'sum duplicate words locally, before the network'}] : []),
+    {name: 'Assign partitions', hint: 'colour each pair by the worker that owns its word'},
+    {name: 'Local partitions',  hint: 'k² boxes: one per (from, to) pair'},
+    {name: 'Sort locally',      hint: 'each outgoing box is sorted by word'},
+    {name: 'Shuffle',           hint: 'boxes cross to their destination worker'},
+    {name: 'Merge',             hint: 'k sorted runs merged per worker'},
+    {name: 'Reduce',            hint: 'one call per word: sum its counts'},
+  ];
+}
+
+function build() {
+  // documents are dealt round-robin: worker w holds documents w, w+k, w+2k, ...
+  const slices = Array.from({length: K}, () => []);
+  DOCS.forEach((d, i) => slices[i % K].push(d));
+  SLICES = slices;
+
+  MAPPED  = SLICES.map(docs => docs.flatMap(d => tokens(d).map(w => ({w, c: 1}))));
+  EMITTED = COMBINE ? MAPPED.map(sumByWord) : MAPPED;
+  PARTS   = EMITTED.map(col => Array.from({length: K}, (_, d) => col.filter(p => partOf(p.w) === d)));
+  MERGED  = Array.from({length: K}, (_, d) => PARTS.flatMap(row => row[d]).sort(byWord));
+  REDUCED = MERGED.map(sumByWord);
+}
+
+const tokens = doc => doc.toLowerCase().match(/[a-z']+/g) || [];
+
+function readCorpus() {
+  DOCS = $('corpus').value.split('\n').map(s => s.trim()).filter(s => tokens(s).length);
+  build();
+}
+
+// ------------------------------------------------------------------ render
+const chip = (p, dest, cls) =>
+  `<span class="chip${dest === null ? '' : ' assigned'}${cls ? ' ' + cls : ''}"
+     ${dest === null ? '' : `style="--d: var(--w${dest})"`}
+   ><span class="w">${p.w}</span><span class="c">${p.c}</span></span>`;
+
+const chips = (pairs, destOf, cls) => pairs.length
+  ? `<div class="chips">${pairs.map(p => chip(p, destOf ? destOf(p.w) : null, cls)).join('')}</div>`
+  : '<div class="empty">— empty —</div>';
+
+const lane = (w, inner) => `<div class="lane" style="--w: var(--w${w})">${inner}</div>`;
+
+function stageRow(i, inner) {
+  const s = STAGES[i], cls = i === STEP ? 'live' : '';
+  return `<div class="stagerow ${cls}">
+      <div class="stagerow-head"><span class="n">${i}</span><span>${s.name}</span>
+        <span class="hint">${s.hint}</span></div>
+      <div class="cluster">${inner}</div>
+    </div>`;
+}
+
+function render(flip) {
+  const before = flip ? boxRects() : null;
+  const iAssign = at('Assign partitions'), iLocal = at('Local partitions');
+  const iShuffle = at('Shuffle'), iSort = at('Sort locally');
+  const assigned = STEP >= iAssign, sorted = STEP >= iSort, shuffled = STEP >= iShuffle;
+  const destOf = assigned ? partOf : null;
+
+  let html = `<div class="cluster">` + SLICES.map((_, w) =>
+    `<div class="col-head" style="--w: var(--w${w})"><span class="dot"></span>Worker ${w}
+       <span class="mod">${partLabel(w)}</span></div>`).join('') + `</div>`;
+
+  html += stageRow(0, SLICES.map((docs, w) => lane(w,
+    docs.length
+      ? docs.map((d, i) => `<div class="box"><div class="box-label">doc ${w + i * K + 1}</div>
+                              <div class="doc">${d}</div></div>`).join('')
+      : '<div class="empty">— no documents —</div>')).join(''));
+
+  // the mapper's raw output; once assigned, chips carry their destination colour
+  if (STEP >= 1) {
+    html += stageRow(1, MAPPED.map((pairs, w) =>
+      lane(w, chips(pairs, COMBINE ? null : destOf, STEP === 1 ? 'fresh' : ''))).join(''));
+  }
+  if (COMBINE && STEP >= at('Combine')) {
+    html += stageRow(at('Combine'), EMITTED.map((pairs, w) =>
+      lane(w, chips(pairs, destOf, STEP === at('Combine') ? 'fresh' : ''))).join(''));
+  }
+
+  // one row of k² boxes serves Local partitions / Sort / Shuffle; the shuffle only moves lanes
+  if (STEP >= iLocal) {
+    const cells = Array.from({length: K}, () => []);
+    PARTS.forEach((row, from) => row.forEach((pairs, to) => {
+      const ps = sorted ? [...pairs].sort(byWord) : pairs;
+      cells[shuffled ? to : from].push(
+        `<div class="box tagged" data-id="${from}-${to}" style="--d: var(--w${to})">
+           <div class="box-label"><span class="arrow">${shuffled ? '↳ from' : '→ to'}</span>
+             worker ${shuffled ? from : to}</div>
+           ${chips(ps, partOf, '')}
+         </div>`);
+    }));
+    html += stageRow(shuffled ? iShuffle : STEP, cells.map((boxes, w) => lane(w, boxes.join(''))).join(''));
+  }
+
+  if (STEP >= at('Merge')) {
+    html += stageRow(at('Merge'), MERGED.map((pairs, w) =>
+      lane(w, `<div class="box" style="--d: var(--w${w})">
+                 <div class="box-label">merged · ${pairs.length} pairs for worker ${w}</div>
+                 ${chips(pairs, partOf, 'fresh')}</div>`)).join(''));
+  }
+
+  if (STEP >= at('Reduce')) {
+    html += stageRow(at('Reduce'), REDUCED.map((pairs, w) =>
+      lane(w, `<div class="box" style="--d: var(--w${w})">
+                 <div class="box-label">final counts · ${pairs.length} words</div>
+                 ${chips(pairs, partOf, 'fresh merged')}</div>`)).join(''));
+  }
+
+  $('floor').style.setProperty('--k', K);
+  $('floor').innerHTML = html;
+  if (before) flipBoxes(before);
+
+  renderRoundbar();
+  renderSteps();
+  renderLoad();
+
+  $('back').disabled = $('rewind').disabled = STEP === 0;
+  $('next').disabled = STEP === STAGES.length - 1;
+}
+
+function renderRoundbar() {
+  const raw = MAPPED.flat().length, out = EMITTED.flat().length;
+  $('roundbar').innerHTML =
+    `<span class="r">${DOCS.length} docs</span><span class="sep">·</span>
+     <span>${raw} tokens → ${out} pairs emitted</span><span class="sep">·</span>
+     <span class="dim">${REDUCED.flat().length} distinct words</span><span class="sep">·</span>
+     <span class="dim">partition: ${HASHED ? 'hash(word) mod ' + K : '1st letter mod ' + K}</span>
+     <span class="sep">·</span><span class="dim">combiner ${COMBINE ? 'on' : 'off'}</span>`;
+}
+
+function renderSteps() {
+  const say = {
+    'Input': `The corpus is dealt across the workers — worker <b>w</b> holds documents w, w+k, w+2k, … Nothing about this split has anything to do with the words in them.`,
+    'Map': `The map runs <b>entirely locally</b>: each token emits <code>(word, 1)</code>. ${MAPPED.flat().length} pairs, one per token, and no worker has looked at another's documents.`,
+    'Combine': `The <b>combiner</b> is the reducer run early, on one mapper's output: ${MAPPED.flat().length} pairs collapse to ${EMITTED.flat().length}. It is pure savings here because sum is associative and commutative — but the framework is free to skip it, so the answer must not depend on it.`,
+    'Assign partitions': `Every pair is stamped with the worker that owns its word: <b>${HASHED ? 'hash(word) mod k' : '(first letter) mod k'}</b>. Colour here means destination, not location — and identical words always get the same colour, which is the whole point.`,
+    'Local partitions': `Each worker splits its output into <b>k local partitions</b>, one per destination — k² boxes in all. Still no network traffic.`,
+    'Sort locally': `Each outgoing box is sorted by word <b>before it is sent</b>, so the receiver never has to sort, only merge.`,
+    'Shuffle': `The <b>shuffle</b>: every box crosses to its destination worker. This is the only stage that touches the network, and it is all-to-all.`,
+    'Merge': `Each worker merges the <b>k sorted runs</b> it received into one. Every occurrence of a word is now adjacent, and on exactly one machine.`,
+    'Reduce': `The reducer is called <b>once per word</b> with the list of its counts, and sums them. Because the partitioner was deterministic, no word is split across two reducers — the counts are final.`,
+  };
+  $('steps').innerHTML = STAGES.map((s, i) =>
+    `<li class="${i === STEP ? 'now' : (i < STEP ? 'done' : '')}">
+       <button data-i="${i}"><span class="num">${i}</span>${s.name}</button></li>`).join('');
+  $('steps').querySelectorAll('button').forEach(b => b.onclick = () => { stop(); seek(+b.dataset.i); });
+  $('say').innerHTML = say[STAGES[STEP].name];
+}
+
+function renderLoad() {
+  const words = REDUCED.map(r => r.length);
+  const top = Math.max(...words, 1);
+  $('load').innerHTML = REDUCED.map((pairs, w) =>
+    `<div class="row" style="--w: var(--w${w})"><span>worker ${w}</span>
+       <span class="track"><span class="fill" style="width:${Math.round(100 * pairs.length / top)}%"></span></span>
+       <span class="n">${pairs.length}</span></div>`).join('');
+  $('loadlab').textContent = `distinct words per reducer: ` + words.join(' · ') +
+    `   (ideal ${(REDUCED.flat().length / K).toFixed(1)})`;
+
+  const sent = PARTS.reduce((t, row, from) =>
+    t + row.reduce((u, pairs, to) => u + (from === to ? 0 : pairs.length), 0), 0);
+  const out = EMITTED.flat().length, raw = MAPPED.flat().length;
+  const boxes = PARTS.flat().filter(b => b.length).length;
+  $('cost').innerHTML = STEP < at('Shuffle')
+    ? `Of the <b>${out}</b> pairs emitted, <b>${sent}</b> must cross the network; the
+       ${out - sent} already sitting on their destination worker stay put.` +
+      (COMBINE ? ` The combiner has already saved ${raw - out} pairs.`
+               : ` Switch the combiner on to send fewer.`)
+    : `<b>${sent}</b> of ${out} pairs crossed the network. <b>${boxes}</b> of the ${K * K} boxes
+       were non-empty${HASHED ? '' : ' — with a first-letter partitioner, whole boxes go missing whenever a slice happens to use no word starting with the right letters'}.`;
+}
+
+// FLIP: measure boxes before the re-render, then animate from their old positions
+function boxRects() {
+  const m = new Map();
+  document.querySelectorAll('.box[data-id]').forEach(b => m.set(b.dataset.id, b.getBoundingClientRect()));
+  return m;
+}
+function flipBoxes(before) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelectorAll('.box[data-id]').forEach(b => {
+    const old = before.get(b.dataset.id);
+    if (!old) return;
+    const now = b.getBoundingClientRect();
+    const dx = old.left - now.left, dy = old.top - now.top;
+    if (!dx && !dy) return;
+    b.style.transition = 'none';
+    b.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => { b.style.transition = ''; b.style.transform = ''; });
+  });
+}
+
+// ------------------------------------------------------------------ driving
+function seek(i) {
+  const iShuffle = at('Shuffle');
+  const wasShuffled = STEP >= iShuffle;
+  const to = Math.max(0, Math.min(STAGES.length - 1, i));
+  const flip = (to >= iShuffle) !== wasShuffled;   // only the shuffle needs boxes to fly
+  STEP = to;
+  render(flip);
+  const live = document.querySelector('.stagerow.live');
+  if (live) live.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+}
+
+function runRound() {
+  if (TIMER) { stop(); return; }
+  seek(0);
+  $('cycle').textContent = '❚❚ Stop';
+  const tick = () => {
+    if (STEP >= STAGES.length - 1) { stop(); return; }
+    seek(STEP + 1);
+    TIMER = setTimeout(tick, 260);
+  };
+  TIMER = setTimeout(tick, 80);
+}
+function stop() {
+  if (TIMER) clearTimeout(TIMER);
+  TIMER = null;
+  $('cycle').textContent = '▶▶ Run';
+}
+
+// re-read the controls and the corpus; keep the current stage if it still exists
+function reset(keepStep) {
+  stop();
+  K = +$('k').value; HASHED = $('hash').checked; COMBINE = $('comb').checked;
+  const was = STAGES.length ? STAGES[STEP].name : 'Input';
+  buildStages();
+  readCorpus();
+  seek(keepStep ? Math.max(0, at(was)) : 0);
+}
+
+$('next').onclick   = () => { stop(); seek(STEP + 1); };
+$('back').onclick   = () => { stop(); seek(STEP - 1); };
+$('rewind').onclick = () => { stop(); seek(0); };
+$('cycle').onclick  = runRound;
+$('fresh').onclick  = () => { $('corpus').value = DEFAULT_CORPUS; reset(false); };
+['k', 'hash', 'comb'].forEach(id => $(id).onchange = () => reset(true));
+$('corpus').oninput = () => reset(true);
+document.addEventListener('keydown', e => {
+  if (['SELECT', 'INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === 'ArrowRight') { e.preventDefault(); stop(); seek(STEP + 1); }
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); stop(); seek(STEP - 1); }
+  if (e.key === 'Home')       { e.preventDefault(); stop(); seek(0); }
+  if (e.key === 'r' || e.key === 'R') runRound();
+});
+
+$('corpus').value = DEFAULT_CORPUS;
+reset(false);
+</script>
