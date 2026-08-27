@@ -283,7 +283,7 @@ def test_merge_join_spills(pairs):
 
 
 def test_merge_join_streams_the_many_side():
-    """The koala improvement: with the 'one' side on the left, a high-degree key
+    """With the 'one' side on the left, a high-degree key
     does not buffer the 'many' side (100k rows all sharing one key)."""
     def run():
         left = iter(['k\tone\n'])

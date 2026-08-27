@@ -14,11 +14,10 @@ To make that visible we run two ways of feeding the same graph to pagerank():
           re-wrapped as lazy. This pins all the lines in RAM and is the
           contrast case: its peak RSS grows with the number of edges.
 
-...across four implementations of the same algorithm (--engine): polars
-(pagerank.py), polarbar (pagerank_bar.py), koala (pagerank_kl.py) and tardigrade
-(pagerank_tg.py). koala spills to an external `sort` subprocess; tardigrade and
-polarbar spill to temp files from inside the process, so none of them shows up
-the same way -- see the child RSS table.
+...across three implementations of the same algorithm (--engine): polars
+(pagerank.py), polarbar (pagerank_bar.py) and tardigrade (pagerank_tg.py).
+tardigrade and polarbar spill to temp files from inside the process, so their
+spilling shows up in this process's own RSS, not in a child's.
 
 Because peak RSS is a per-process high-water mark, each configuration is run in
 its own subprocess so the numbers don't contaminate each other.
@@ -37,7 +36,7 @@ Usage:
     python demo_memory.py --no-cse
 
     # compare implementations in one table (default runs all of them):
-    python demo_memory.py --configs polars-lazy koala-lazy tardigrade-lazy
+    python demo_memory.py --configs polars-lazy polarbar-lazy tardigrade-lazy
     python demo_memory.py --configs tardigrade-lazy tardigrade-eager
 
     # A single run (this is what the table driver spawns internally):
@@ -53,11 +52,9 @@ import time
 
 import polars as pl
 
-import koala as kl
 import tardigrade as tg
 import pagerank
 import pagerank_bar
-import pagerank_kl
 import pagerank_tg
 
 from collections import namedtuple
@@ -85,11 +82,6 @@ def polars_lines(path, mode):
     return scan.collect(engine='streaming').lazy() if mode == 'eager' else scan
 
 
-def koala_lines(path, mode):
-    """Same as polars, wrapped so koala's group_by/join spill to disk."""
-    return kl.KoalaFrame(polars_lines(path, mode))
-
-
 def tardigrade_lines(path, mode):
     """A CALLABLE returning a fresh frame -- a tardigrade LazyFrame is one-shot,
     so the main loop re-scans rather than re-executing a lazy plan.
@@ -106,7 +98,6 @@ def tardigrade_lines(path, mode):
 ENGINES = {
     'polars':     Engine(pagerank,     polars_lines,     frozenset({'cse'})),
     'polarbar':   Engine(pagerank_bar, polars_lines,     frozenset({'batch_size'})),
-    'koala':      Engine(pagerank_kl,  koala_lines,      frozenset({'cse', 'batch_size'})),
     'tardigrade': Engine(pagerank_tg,  tardigrade_lines, frozenset({'batch_size'})),
 }
 
@@ -120,8 +111,9 @@ def peak_rss_mb(who=resource.RUSAGE_SELF):
     """Peak resident set size, in MiB.
 
     who=RUSAGE_SELF  -> this Python process only.
-    who=RUSAGE_CHILDREN -> largest waited-for child (e.g. koala's external
-        `sort`); this is invisible to RUSAGE_SELF, so measure it separately.
+    who=RUSAGE_CHILDREN -> largest waited-for child; no engine here spawns
+        one, but a child's RSS is invisible to RUSAGE_SELF, so measure it
+        separately rather than assume it is zero.
     """
     r = resource.getrusage(who).ru_maxrss
     # macOS reports ru_maxrss in bytes; Linux reports kilobytes.
@@ -180,8 +172,9 @@ def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None
 
     `configs` is a list of (engine, mode) pairs. The printed table puts one
     config per row and one edge count per column. lazy self RSS should stay
-    ~flat as edges grow while eager climbs; koala spills its group_by/join to
-    disk so it stays bounded too, at a fixed per-iteration overhead.
+    ~flat as edges grow while eager climbs; polarbar and tardigrade spill their
+    group_by/join to disk so they stay bounded too, at a per-iteration cost in
+    time.
     """
     total_runs = len(edge_sizes) * len(configs)
     done = 0
@@ -221,10 +214,10 @@ def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None
 def _print_matrix(rows, configs, nodes, iterations, cse):
     """Render one sub-table per metric: config per row, edge count per column.
 
-    child RSS is the largest external `sort` koala spawns (invisible to the
-    process's own RSS); it stays ~0 for polars, which spawns no such helper.
+    child RSS would be the largest subprocess an engine spawns; every engine
+    here spills in-process, so it stays ~0 throughout.
     """
-    label = lambda c: f'{c[0]}-{c[1]}'                        # ('koala','lazy') -> 'koala-lazy'
+    label = lambda c: f'{c[0]}-{c[1]}'                        # ('polars','lazy') -> 'polars-lazy'
     sizes = [r['lines'] for r in rows]
     metrics = [('self RSS (MB)', 'rss'),
                ('child RSS (MB)', 'child'),
@@ -236,9 +229,9 @@ def _print_matrix(rows, configs, nodes, iterations, cse):
     print()
     print(f'Fixed nodes = {nodes:,}   iterations = {iterations}   '
           f'CSE = {"on" if cse else "off"}   (columns = total lines)')
-    print("(self RSS = this process; child RSS = koala's external sort, ~0 for "
-          'polars and for tardigrade, which spills in-process. lazy self RSS '
-          '~flat as edges grow; eager climbs.)')
+    print('(self RSS = this process; child RSS = any subprocess, ~0 here since '
+          'every engine spills in-process. lazy self RSS ~flat as edges grow; '
+          'eager climbs.)')
 
     for title, key in metrics:
         print()
@@ -260,8 +253,7 @@ if __name__ == '__main__':
     parser.add_argument('--engine', choices=tuple(ENGINES), default='polars',
                         help='which pagerank implementation to run in single-run '
                              'mode: polars (pagerank.py), polarbar '
-                             '(pagerank_bar.py), koala (pagerank_kl.py) '
-                             'or tardigrade (pagerank_tg.py)')
+                             '(pagerank_bar.py) or tardigrade (pagerank_tg.py)')
     parser.add_argument('--configs', nargs='+', choices=ALL_CONFIGS,
                         default=ALL_CONFIGS, metavar='ENGINE-MODE',
                         help='engine-mode configs to compare in the table, a '
@@ -276,10 +268,8 @@ if __name__ == '__main__':
     parser.add_argument('--iterations', type=int, default=10,
                         help='pagerank iterations per run')
     parser.add_argument('--batch_size', type=int, default=None,
-                        help='koala: rows per DataFrame emitted by '
-                             "inner_join's IO source (default: koala's "
-                             f'{kl.DEFAULT_BATCH_SIZE:,}). tardigrade: rows per '
-                             f'sorted run (default: {TARDIGRADE_BATCH_SIZE:,}). '
+                        help='tardigrade: rows per sorted run '
+                             f'(default: {TARDIGRADE_BATCH_SIZE:,}). '
                              'polarbar: pairs per sorted run (default: '
                              f'{POLARBAR_BATCH_SIZE:,}). '
                              'Smaller caps memory. Ignored by polars.')

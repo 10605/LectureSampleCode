@@ -48,7 +48,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
     # NOTE ON DANGLING NODES: score_dict is seeded from ALL nodes (src union
     # dst). A node with no indegree is never a 'dst', so it is never updated in
     # the loop below and keeps emitting messages from its stale 1.0 score every
-    # iteration. This differs from the join-based pagerank.py / pagerank_kl.py,
+    # iteration. This differs from the join-based pagerank.py,
     # where such a node is dropped after iteration 1 (its scores row disappears,
     # and the inner join on 'src' then drops its out-edges) so it stops
     # contributing. The two conventions therefore give different scores whenever

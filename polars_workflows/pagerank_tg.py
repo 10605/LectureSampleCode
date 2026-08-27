@@ -1,17 +1,17 @@
 """pagerank_tg.py -- pagerank over tardigrade's streaming LazyFrame.
 
-The same algorithm as pagerank_kl.py, with polars/koala swapped out for plain
-Python iterators. The shape is unchanged because it was map-reduce all along:
+The same algorithm as pagerank.py, with polars swapped out for plain Python
+iterators. The shape is unchanged because it was map-reduce all along:
 
   * the O(nodes) tables -- outdegree per src, and the scores -- are ordinary
-    dicts, exactly as pagerank_kl.py keeps them as in-memory DataFrames;
+    dicts, exactly as pagerank.py keeps them as in-memory DataFrames;
 
   * the O(edges) step, which emits one message per edge, is streamed: the edge
     file is re-scanned each iteration and the messages are grouped by dst
     through tardigrade's external sort, so a graph with far more edges than RAM
     still runs.
 
-Assumes, as pagerank_kl.py does, that every node has indegree >= 1 and
+Assumes, as pagerank.py does, that every node has indegree >= 1 and
 outdegree >= 1: a node with no incoming edge gets no message and so drops out
 of the score table.
 """
@@ -53,7 +53,7 @@ def pagerank(scan_edges, reset=0.15, num_iterations=30,
                       .collect())
     show('n_outlinks', list(n_outlinks.items()))
 
-    # every src and every dst, deduped -- pagerank_kl.py's concat + unique
+    # every src and every dst, deduped -- pagerank.py's concat + unique
     nodes = (edges()
              .map(str.split).explode()
              .unique(batch_size=batch_size)
@@ -73,7 +73,7 @@ def pagerank(scan_edges, reset=0.15, num_iterations=30,
         mass = {src: (1 - reset) * scores[src] / n for src, n in n_outlinks.items()}
 
         # the edge-proportional step: one message per edge, keyed by dst.  This
-        # is where pagerank_kl.py does its merge_join; here mass is already in
+        # is where pagerank.py does its join; here mass is already in
         # memory, so a dict lookup does the same work without the second sort.
         def message(line):
             src, dst = line.split()

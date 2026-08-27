@@ -1,29 +1,5 @@
 # STATUS
 
-## Koala vs Polars
-
-Koala was an effort to rewrite *just the memory-intensive parts* of
-polars, using external unix sorts.  That didn't work - polars seems to
-really like using memory!
-
-Fixed nodes = 20,000   iterations = 2   CSE = on   (columns = total lines)
-
-self RSS (MB)    1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
---------------------------------------------------------------------------------------
-koala-lazy           305.7       385.1       590.5       951.5      1454.5      2151.3
-polars-lazy          379.1       494.8       781.4      1200.0      1945.7      3120.1
-															                          
-child RSS (MB)   1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
---------------------------------------------------------------------------------------
-koala-lazy           118.0       137.5       168.3       203.0       314.2       515.0
-polars-lazy            0.0         0.0         0.0         0.0         0.0         0.0
-															                          
-elapsed (s)      1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
---------------------------------------------------------------------------------------
-koala-lazy             4.5         9.8        19.6        38.9       100.0       203.2
-polars-lazy            0.1         0.1         0.3         0.5         1.0         1.7
-
-
 ## Tardigrade (water bears) vs Polars
 
 Tardigrade is all based on Python generators and on-disk sorting.
@@ -44,8 +20,8 @@ tardigrade-lazy         5.0        11.7        23.9        50.1       106.5     
 
 ## PolarBar
 
-This is a second koala-like attempt to localize use of polar's memory
-by pulling out joins and group_by operations.  
+An attempt to localize polars' memory use by pulling the joins and
+group_by operations out into sorted key-value files on disk.
 
 ## Wordcount stress test
 

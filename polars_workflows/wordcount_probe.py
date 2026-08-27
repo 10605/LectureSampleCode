@@ -28,7 +28,7 @@ def peak_rss_gb(who=resource.RUSAGE_SELF):
     """Peak resident set size, in MiB.
 
     who=RUSAGE_SELF  -> this Python process only.
-    who=RUSAGE_CHILDREN -> largest waited-for child (e.g. koala's external
+    who=RUSAGE_CHILDREN -> largest waited-for child (e.g. an external
         `sort`); this is invisible to RUSAGE_SELF, so measure it separately.
     """
     r = resource.getrusage(who).ru_maxrss
