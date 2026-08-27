@@ -12,6 +12,8 @@ unix-poetry/*.wc
 
 # large downloaded corpora (enwiki-2013 etc)
 data/*.gz
+# RCV1, used by polars_workflows/wordcount_probe.py -- ~1Gb for the train split
+data/RCV1.*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

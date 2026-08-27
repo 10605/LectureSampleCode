@@ -20,6 +20,30 @@ Most scripts read corpora and graphs from `../data`.
 | `phrases.py` | same idea extended to bigrams, with foreground/background phrase scoring |
 | `matmul.py` | sparse matrix multiply as a self-join plus a windowed sum, checked against a gold product in `../data/matmul.json` |
 
+## Clustering
+
+`kmeans.py` — spherical k-means over the documents of a corpus. Documents
+arrive as sparse tf-idf vectors, precomputed offline and shipped alongside each
+corpus as `data/<corpus>.tfidf.tsv`: one `(doc, token, w)` row per token per
+document, each document L2-normalized, `doc` being its line number in the
+corpus.
+
+Held that way, both halves of the algorithm are joins: assignment is
+`docs ⋈ centroids ON token` summed per `(doc, cluster)` — a sparse matrix
+product, and since both sides are unit length that dot product *is* the cosine
+similarity — and the update is `docs ⋈ assignment ON doc` summed per
+`(cluster, token)`. Only the O(k × vocab) centroid table is materialized, the
+same shape as pagerank's score table.
+
+```
+python3 kmeans.py                                    # 8 clusters over bluecorpus
+python3 kmeans.py --k 12 --num_iterations 30 --seed 7
+python3 kmeans.py --corpus ../data/redcorpus.txt
+```
+
+Prints per-iteration mean cosine and the number of documents that moved, then
+each cluster's size, heaviest terms, and closest members.
+
 ## Pagerank, four ways
 
 Same algorithm, same default graph (`../data/citeseer-graph.txt`), different
@@ -75,9 +99,15 @@ execution engines. Each takes `--filename` and can read a `.gz` graph.
 ## Tests
 
 ```
-python3 -m pytest        # 162 tests
+python3 -m pytest        # 196 tests
 ```
 
 `test_bar.py` and `test_tardigrade.py` check sort correctness and stability
 against in-memory oracles, and — importantly — that spill files are deleted and
 that no more than `fanin` files are held open during a merge.
+
+`test_kmeans.py` checks each join against the dense in-memory version:
+assignment against a dict-of-dicts argmax over cosines, the update against a
+plain mean. The cases that matter are the ones a sparse formulation can quietly
+drop — a document sharing no token with any centroid, a cluster that loses
+every member — plus determinism under a fixed seed.
