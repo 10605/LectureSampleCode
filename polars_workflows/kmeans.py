@@ -151,16 +151,24 @@ def recompute_centroids(
     length means that a dot product computes cosine similarity.
     """
 
-    return (
+    # sum the weights of each token in each cluster
+    summed_lf = (
         # get the weighted tokens for the documents in each cluster
         docs_lf.join(assignment_df.lazy(), on='doc_id')
-
-        # sum the weights of each token in each cluster
         .group_by('cluster_id', 'token').agg(pl.col('w').sum().alias('w'))
+    )
 
-        # normalize to unit length
-        .with_columns(
-            w=pl.col('w') / pl.col('w').pow(2).sum().sqrt().over('cluster_id'))
+    # the L2 norm of each cluster's centroid: one row per cluster
+    norms_lf = (
+        summed_lf.group_by('cluster_id')
+        .agg(pl.col('w').pow(2).sum().sqrt().alias('norm'))
+    )
+
+    return (
+        # join the per-cluster norm back onto every token row, then normalize
+        summed_lf.join(norms_lf, on='cluster_id')
+        .with_columns(w=pl.col('w') / pl.col('norm'))
+        .drop('norm')
         .collect(engine='streaming')
     )
 
