@@ -13,19 +13,24 @@ bg_lines = pl.scan_lines("../data/redcorpus.txt")
 def lowercase(expr):
     return expr.str.to_lowercase()
 
+def wordcount_pipe(ldf):
+    return(
+        ldf
+        .with_columns(
+            token=(
+                pl.col('line')
+                .pipe(lowercase)
+                .str.extract_all(r'\b\w+\b')))
+        .explode('token')
+        .group_by('token').len()
+    )
+
+
 def shift(expr):
     return expr.str.extract(r'\W*\w+\W+(.*)')
 
 def bigrams(expr):
     return expr.str.replace_all(r'\W+', ' ').str.extract_all(r'\b\w+ \w+')
-
-def wordcount_pipe(ldf):
-    return(
-        ldf
-        .with_columns(token=pl.col('line').pipe(lowercase).str.extract_all(r'\b\w+\b'))
-        .explode('token')
-        .group_by('token').len()
-    )
 
 
 def bigram_pipe(ldf):
@@ -81,9 +86,12 @@ def pair_score_pipe(key, fg_df, bg_df, fg_n, bg_n):
         )
 
 
-########### experiment 1: look at most informative words/phrases for foreground vs background
+# 1: look at most informative words and phrases in the foreground vs
+# background
 
-word_pairs = pair_score_pipe('token', fg_word_count, bg_word_count, voc_size(fg_word_count), voc_size(bg_word_count))
+word_pairs = pair_score_pipe(
+    'token', fg_word_count, bg_word_count,
+    voc_size(fg_word_count), voc_size(bg_word_count))
 
 def show_extreme_scores(ldf, key, n=10):
     sorted = ldf.sort(key, descending=True)
@@ -95,7 +103,9 @@ def show_extreme_scores(ldf, key, n=10):
 print(' words '.center(80, '='))
 show_extreme_scores(word_pairs, 'fg_score')
 
-phrase_stats = pair_score_pipe('bigram', fg_phrase_count, bg_phrase_count, voc_size(fg_phrase_count), voc_size(bg_phrase_count))
+phrase_stats = pair_score_pipe(
+    'bigram', fg_phrase_count, bg_phrase_count,
+    voc_size(fg_phrase_count), voc_size(bg_phrase_count))
 
 print(' phrases '.center(80, '='))
 show_extreme_scores(phrase_stats, 'fg_score')
