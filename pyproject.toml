@@ -1,0 +1,14 @@
+[project]
+name = "lecture-sample-code"
+version = "0.1.0"
+description = "Sample code used in 10-605 lectures"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.43",
+]
+
+[tool.uv]
+# These are runnable scripts, not an installable package, so don't try to
+# build/install the project itself into the environment.
+package = false
