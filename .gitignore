@@ -222,3 +222,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# upstream polars source, cloned for reference (git clone --depth 1 -b py-1.44.1)
+polars_src/
