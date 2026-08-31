@@ -16,9 +16,7 @@ def show(msg, df, k=10):
         df = df.head(k).collect(engine='streaming')
     print(df)
 
-def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True):
-    # cse=False disables common-subplan elimination, which otherwise inserts a
-    # CACHE node for the shared `edges` subplan (see MEMORY_DIAGNOSIS.md).
+def pagerank(edge_lines, reset=0.15, num_iterations=30):
 
     # construct edges
     edges = (
@@ -29,6 +27,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True):
             dst=pl.col('edge').struct['2'])
         .select('src', 'dst')
     )
+
     # augment edges with number of outlinks from the src 
     n_outlinks = (
         edges.group_by('src').len()
@@ -46,8 +45,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True):
             how='vertical')
         .unique()
         .with_columns(score=pl.lit(1.0).cast(pl.Float64))
-        .collect(engine='streaming',
-                 optimizations=pl.QueryOptFlags(comm_subplan_elim=cse))
+        .collect(engine='streaming')
     )
     show('pagerank_scores', pagerank_scores)
 
@@ -85,8 +83,7 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30, cse=True):
             .rename(dict(dst='node'))
             .select('node', 'score')
             # and put in memory
-            .collect(engine='streaming',
-                     optimizations=pl.QueryOptFlags(comm_subplan_elim=cse))
+            .collect(engine='streaming')
         )
 
     elapsed = time.time() - start
@@ -107,9 +104,6 @@ if __name__ == "__main__":
                         help='number of pagerank iterations')
     parser.add_argument('--verbose', type=int, default=1,
                         help='verbosity level: 1 shows show() output, 0 suppresses it')
-    parser.add_argument('--no-cse', action='store_true',
-                        help='disable common-subplan elimination in collect() '
-                             '(memory experiment; see MEMORY_DIAGNOSIS.md)')
     args = parser.parse_args()
 
     VERBOSE = args.verbose
@@ -127,5 +121,4 @@ if __name__ == "__main__":
         lines = pl.scan_lines(process.stdout)
     else:
         lines = pl.scan_lines(filename)
-    pagerank(lines, reset=args.reset, num_iterations=args.num_iterations,
-             cse=not args.no_cse)
+    pagerank(lines, reset=args.reset, num_iterations=args.num_iterations)

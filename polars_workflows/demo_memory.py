@@ -32,9 +32,6 @@ Usage:
     # tune it:
     python demo_memory.py --nodes 20000 --edges 200000 1000000 4000000 --iterations 10
 
-    # rule out common-subplan-elimination caching (see MEMORY_DIAGNOSIS.md):
-    python demo_memory.py --no-cse
-
     # compare implementations in one table (default runs all of them):
     python demo_memory.py --configs polars-lazy polarbar-lazy tardigrade-lazy
     python demo_memory.py --configs tardigrade-lazy tardigrade-eager
@@ -96,7 +93,7 @@ def tardigrade_lines(path, mode):
 
 
 ENGINES = {
-    'polars':     Engine(pagerank,     polars_lines,     frozenset({'cse'})),
+    'polars':     Engine(pagerank,     polars_lines,     frozenset()),
     'polarbar':   Engine(pagerank_bar, polars_lines,     frozenset({'batch_size'})),
     'tardigrade': Engine(pagerank_tg,  tardigrade_lines, frozenset({'batch_size'})),
 }
@@ -137,13 +134,11 @@ def generate_graph(path, n_nodes, n_edges, seed=1):
     return n_nodes + n_edges                          # total lines written
 
 
-def run_single(mode, path, iterations, engine='polars', cse=True, batch_size=None):
+def run_single(mode, path, iterations, engine='polars', batch_size=None):
     """Run pagerank once and report this process's peak RSS."""
     spec = ENGINES[engine]
     spec.module.VERBOSE = 0                          # silence show() output
     kwargs = dict(num_iterations=iterations)
-    if 'cse' in spec.knobs:
-        kwargs['cse'] = cse
     if 'batch_size' in spec.knobs:
         if batch_size is not None:
             kwargs['batch_size'] = batch_size
@@ -167,7 +162,7 @@ def _parse_marker(text, marker):
     return float('nan')
 
 
-def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None):
+def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
     """Spawn a fresh subprocess per (config, edges) and tabulate peak RSS.
 
     `configs` is a list of (engine, mode) pairs. The printed table puts one
@@ -191,8 +186,6 @@ def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None
             cmd = [sys.executable, __file__, '--single',
                    '--mode', mode, '--engine', engine, '--graph', path,
                    '--iterations', str(iterations)]
-            if not cse:
-                cmd.append('--no-cse')
             if batch_size is not None:
                 cmd += ['--batch_size', str(batch_size)]
             proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -208,10 +201,10 @@ def run_matrix(nodes, edge_sizes, iterations, configs, cse=True, batch_size=None
         rows.append(row)
         os.remove(path)
 
-    _print_matrix(rows, configs, nodes, iterations, cse)
+    _print_matrix(rows, configs, nodes, iterations)
 
 
-def _print_matrix(rows, configs, nodes, iterations, cse):
+def _print_matrix(rows, configs, nodes, iterations):
     """Render one sub-table per metric: config per row, edge count per column.
 
     child RSS would be the largest subprocess an engine spawns; every engine
@@ -228,7 +221,7 @@ def _print_matrix(rows, configs, nodes, iterations, cse):
 
     print()
     print(f'Fixed nodes = {nodes:,}   iterations = {iterations}   '
-          f'CSE = {"on" if cse else "off"}   (columns = total lines)')
+          '(columns = total lines)')
     print('(self RSS = this process; child RSS = any subprocess, ~0 here since '
           'every engine spills in-process. lazy self RSS ~flat as edges grow; '
           'eager climbs.)')
@@ -273,17 +266,12 @@ if __name__ == '__main__':
                              'polarbar: pairs per sorted run (default: '
                              f'{POLARBAR_BATCH_SIZE:,}). '
                              'Smaller caps memory. Ignored by polars.')
-    parser.add_argument('--no-cse', action='store_true',
-                        help='disable common-subplan elimination in pagerank '
-                             '(memory experiment; see MEMORY_DIAGNOSIS.md)')
     args = parser.parse_args()
 
     if args.single:
         run_single(args.mode, args.graph, args.iterations,
-                   engine=args.engine, cse=not args.no_cse,
-                   batch_size=args.batch_size)
+                   engine=args.engine, batch_size=args.batch_size)
     else:
         configs = [tuple(c.split('-')) for c in args.configs]
         run_matrix(args.nodes, args.edges, args.iterations,
-                   configs=configs, cse=not args.no_cse,
-                   batch_size=args.batch_size)
+                   configs=configs, batch_size=args.batch_size)
