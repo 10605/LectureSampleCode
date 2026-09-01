@@ -43,6 +43,7 @@ import argparse
 import os
 import random
 import resource
+import signal
 import subprocess
 import sys
 import time
@@ -155,6 +156,16 @@ def run_single(mode, path, iterations, engine='polars', batch_size=None):
     print(f'ELAPSED_S {elapsed:.2f}')
 
 
+def _was_oom_killed(returncode):
+    """Did the kernel SIGKILL this run for exceeding a memory limit?
+
+    Under a container memory cap (see README) the OOM killer takes the
+    process: subprocess reports -SIGKILL, and a shell reports 128+9.  Any
+    other nonzero status is a real failure and should still be raised.
+    """
+    return returncode in (-signal.SIGKILL, 128 + signal.SIGKILL)
+
+
 def _parse_marker(text, marker):
     for line in text.splitlines():
         if line.startswith(marker):
@@ -189,6 +200,13 @@ def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
             if batch_size is not None:
                 cmd += ['--batch_size', str(batch_size)]
             proc = subprocess.run(cmd, capture_output=True, text=True)
+            if _was_oom_killed(proc.returncode):
+                # Expected when running under a memory cap: record it and keep
+                # sweeping, so one engine dying doesn't hide the others.
+                print(' OOM', file=sys.stderr)
+                for key in ('rss', 'child', 's'):
+                    row[key][(engine, mode)] = None
+                continue
             if proc.returncode != 0:
                 print(' FAILED', file=sys.stderr)
                 sys.stderr.write(proc.stderr)
@@ -202,6 +220,11 @@ def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
         os.remove(path)
 
     _print_matrix(rows, configs, nodes, iterations)
+
+
+def _cell(value, width):
+    """One table cell: a number, or OOM where the run was killed."""
+    return f'{"OOM":>{width}}' if value is None else f'{value:>{width}.1f}'
 
 
 def _print_matrix(rows, configs, nodes, iterations):
@@ -232,7 +255,7 @@ def _print_matrix(rows, configs, nodes, iterations):
         print(hdr)
         print('-' * len(hdr))
         for c in configs:
-            vals = ''.join(f'{r[key][c]:>{col_w}.1f}' for r in rows)
+            vals = ''.join(_cell(r[key][c], col_w) for r in rows)
             print(f'{label(c):<{name_w}}{vals}')
 
 
