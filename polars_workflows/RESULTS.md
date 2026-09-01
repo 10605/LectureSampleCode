@@ -107,6 +107,13 @@ consequence of the unlimited default OOC budget documented in
 Contrast tardigrade, which finishes the 32M graph in 65 MB -- 40x less than
 polars needs, and the same 65 MB it uses on the 1M graph.
 
+Caveat: these thresholds are bracketed, not located. 16M lines is somewhere in
+1--2 GB and 32M somewhere in 2--4 GB; the caps swept were powers of two, so
+that is as tight as this says. The 85 bytes/line figure is interpolated from
+two points rather than measured, and nothing here establishes that the relation
+is linear rather than merely increasing. Bisecting the caps (1.25, 1.5,
+1.75 GB) would pin both thresholds and test that figure.
+
 ## What is PolarBar?
 
 An attempt to localize polars' memory use by pulling the joins and
