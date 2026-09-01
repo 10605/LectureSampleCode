@@ -168,6 +168,80 @@ per iteration at k=2 rising to 13.5 s at k=64.
 Extrapolating the memory trend, k=128 would land near 250--300 GB. Untested,
 and close enough to the machine's 512 GB to be worth checking before running.
 
+### Where the k-means memory actually goes
+
+The table above blames the `docs join centroids ON token` intermediate. Reading
+`polars-stream/src/nodes/group_by.rs` says why it is not optimized away, and
+the fix is not the one you would guess.
+
+The streaming `group_by` is a two-level hash aggregation. A small hot table
+pre-aggregates -- exactly the "start aggregating earlier" you would want -- but
+it holds only `POLARS_HOT_TABLE_SIZE` groups, **4096 by default**. A key that
+misses is not aggregated; its row is buffered raw in a `SpillFrame` and
+replayed per-partition at the end. The key here is `(doc_id, cluster_id)`:
+at k=64 that is ~46M groups against 4096 slots, so essentially every row is
+buffered, and with the OOC budget unlimited nothing ever spills. Memory is
+O(rows), not O(groups), and at ~20 shared tokens per (doc, cluster) pair that
+is roughly a 20x penalty.
+
+Nor is the projection at fault: `with_columns(prod=...)` is already fused into
+per-morsel streaming evaluation, so there is nothing there to unroll.
+
+Turning the knob confirms the mechanism -- RCV1, k=16, 5 iterations:
+
+    POLARS_HOT_TABLE_SIZE   peak RSS   elapsed
+                       4096   11818 MB     13.2 s
+                      65536    9003 MB     13.0 s
+                    1048576    7469 MB     13.1 s
+                    8388608   11286 MB     15.7 s
+                   33554432   29193 MB     24.7 s
+
+37% off for free at ~1M, then it reverses: the hot table is allocated per
+thread per input, so past some size the tables cost more than the buffering
+they avoid. **Do not build on this.** `POLARS_HOT_TABLE_SIZE` is undocumented,
+read straight from the environment with an unchecked parse, and the optimum is
+data-dependent. It is evidence about the mechanism, not a setting to ship.
+
+### kmeans_opt.py: batching, the fix that is ours
+
+`kmeans_opt.py` is a copy of `kmeans.py` -- read them side by side -- differing
+only in that both heavy steps run in `n_batches` passes over the documents.
+Assignment is independent per document, so documents split into disjoint
+batches and the results concatenate. Recomputing centroids is a sum, and sums
+decompose, so each batch yields a partial `(cluster_id, token)` table -- at
+most k x vocab rows however many documents fed it -- and those are added at
+the end. Both are exact.
+
+    n_batches   assignment only   both steps   elapsed (both)
+    kmeans.py          11833 MB     11833 MB           13.0 s
+            4           6257 MB      5756 MB           29.9 s
+            8           5935 MB      4835 MB           50.0 s
+           16           5793 MB      4036 MB           91.8 s
+           32           5773 MB      3997 MB          176.4 s
+
+Verified identical to `kmeans.py` over 24 combinations (2 corpora x 3 (k, seed)
+x 4 batch counts, including `n_batches=1`): same documents, same cluster
+assignments, centroid weights agreeing to 1.1e-16. Mean cosine on RCV1 is
+0.2094 in every row above.
+
+Batching assignment alone halves peak memory and flattens near 5.8 GB, because
+`recompute_centroids` is the other half of the same problem. Batching both
+reaches ~4.0 GB, a third of the original.
+
+Two things to weigh. **The time cost is steep**: a third of the memory costs
+about 7x the wall clock at `n_batches=16`. This is worth doing when the
+alternative is not finishing, and not otherwise. And **the remaining floor is
+not the join** -- it is the vectors being scanned, the centroid table, and the
+`n_batches` partial sums held in a list before they are combined. That last
+one grows with `n_batches`, working slightly against the point; it did not
+bite in the range measured (3997 MB at 32 batches against 4036 at 16), but
+folding the partials pairwise would remove the concern rather than rely on it
+staying small.
+
+The general lesson is the one the pagerank tables teach: in a dataframe engine
+the intermediates cost the memory, not the results, and the durable fix is to
+bound them in your own query rather than to hope the engine will.
+
 ## What is PolarBar?
 
 An attempt to localize polars' memory use by pulling the joins and

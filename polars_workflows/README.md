@@ -121,6 +121,12 @@ in `RESULTS.md`.
   python3 demo_kmeans.py --vectors ../data/RCV1.full_train.tfidf.tsv --k 2 4 8 16 32
   ```
 
+- **`kmeans_opt.py`** — a copy of `kmeans.py` whose two heavy steps run in
+  `n_batches` passes over the documents, bounding the join/group_by
+  intermediates that otherwise set peak memory. Exact, not approximate: same
+  clusters, weights to 1.1e-16. A third of the memory on RCV1 for ~7x the
+  time (`RESULTS.md`). Kept separate so the simple version stays simple.
+
 - **`wordcount_probe.py`** — stress test on the RCV1 corpus: tokenize, emit
   `(docid##label, token)` pairs, sort and group them through `PolarBar`.
   Flags for corpus size/split, sort batch size, and fan-in (`--fanin 0`
