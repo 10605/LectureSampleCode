@@ -82,6 +82,35 @@ execution engines. Each takes `--filename` and can read a `.gz` graph.
   python3 demo_memory.py --nodes 20000 --edges 1000000 2000000 4000000 --iterations 10
   ```
 
+### Running under a memory cap
+
+On a large-RAM machine these experiments cannot show what they are meant to
+show: polars' out-of-core budget defaults to unlimited, so it never spills, and
+the low-memory engines never get to prove anything. The `Dockerfile` at the
+repo root builds a Linux image with the locked dependencies, to be run under a
+hard memory limit:
+
+```
+container build -t pr-demo .                          # or: docker build -t pr-demo .
+container run --rm -m 512m -v "$PWD:/work" -w /work pr-demo \
+    python polars_workflows/demo_memory.py --nodes 20000 --edges 8000000 \
+    --iterations 10 --configs polars-lazy tardigrade-lazy
+```
+
+Under the cap the kernel OOM-kills a run that will not fit. `demo_memory.py`
+treats that as a result rather than a crash — the cell reads `OOM` and the
+sweep carries on, so one engine dying does not hide the others:
+
+```
+self RSS (MB)     8,020,000
+---------------------------
+polars-lazy             OOM
+tardigrade-lazy        66.4
+```
+
+Any other nonzero exit is still raised as a real failure. Measured numbers are
+in `RESULTS.md`.
+
 - **`wordcount_probe.py`** — stress test on the RCV1 corpus: tokenize, emit
   `(docid##label, token)` pairs, sort and group them through `PolarBar`.
   Flags for corpus size/split, sort batch size, and fan-in (`--fanin 0`
@@ -94,12 +123,15 @@ execution engines. Each takes `--filename` and can read a `.gz` graph.
 - `MEMORY_DIAGNOSIS.md` — why the lazy pagerank demo does *not* show flat
   memory on polars 1.42.1: the streaming `group_by` and `join` buffer their
   input proportional to the number of edges. Common-subplan elimination was
-  ruled out as the cause.
+  ruled out as the cause. Later sections read the polars 1.44.1 engine source
+  for what its lazy `group_by` actually does (two-level hash aggregation, never
+  a sort) and what it writes to disk, and measure the spilling it can be forced
+  into.
 
 ## Tests
 
 ```
-python3 -m pytest        # 196 tests
+python3 -m pytest        # 193 passed, 1 xfailed
 ```
 
 `test_bar.py` and `test_tardigrade.py` check sort correctness and stability
