@@ -114,6 +114,60 @@ two points rather than measured, and nothing here establishes that the relation
 is linear rather than merely increasing. Bisecting the caps (1.25, 1.5,
 1.75 GB) would pin both thresholds and test that figure.
 
+## K-means on RCV1
+
+`demo_kmeans.py` sweeps the number of clusters, each k in its own subprocess so
+peak RSS is that run's alone. Corpus is the full RCV1 train split: 723,988
+documents, 215,337 tokens after pruning, 77.2M nonzeros (2.4 GB of vectors).
+
+The vectors are built offline by `tfidf_vectorize.py`, which lives outside this
+repo on purpose. **The label column must be stripped first**: RCV1 lines are
+`labels<TAB>text`, and the tokenizer turns `CCAT`/`GCAT`/`MCAT`/`ECAT` into
+ordinary tokens. `ccat` occurs in 337,117 of 723,988 documents -- 46.6%, just
+*under* the max_df=0.5 cutoff, so pruning does not remove it, and the
+clustering would be handed RCV1's own top-level categories as features.
+
+```
+cut -f2- data/RCV1.full_train.txt > data/RCV1.full_train.text.txt
+python3 tfidf_vectorize.py data/RCV1.full_train.text.txt \
+    -o data/RCV1.full_train.tfidf.tsv          # 3.7 s wall, 66 s cpu
+python3 demo_kmeans.py --vectors ../data/RCV1.full_train.tfidf.tsv \
+    --k 2 4 8 16 32 64
+```
+
+    k   iters   peak RSS (MB)   elapsed (s)   mean cosine
+---------------------------------------------------------
+    2      20          4761.0          26.3        0.1446
+    4      20          5877.1          30.0        0.1652
+    8      20          7570.2          36.7        0.1920
+   16      20         11896.4          53.8        0.2146
+   32      20         30494.5         108.9        0.2480
+   64      20         93265.8         270.5        0.2811
+
+**Nothing converged.** Every run hit the `max_iterations = 20` cap, so `iters`
+is the setting rather than a result and `mean cosine` is quality after 20
+iterations, not at convergence. (Bluecorpus converges in 17--19.) The timings
+are therefore comparable per-20-iterations, but say nothing about what
+clustering RCV1 to convergence would cost.
+
+**Memory grows superlinearly in k, and steeply**: 4.8 GB at k=2 to 93 GB at
+k=64, 18% of iStudio. The step ratios accelerate -- 2.6x from k=16 to 32, 3.1x
+from 32 to 64, for a doubling of k each time.
+
+That is not the centroid table. At k=64 that table is 64 x 215,337 ~ 13.8M
+rows, nowhere near 93 GB. It is the `docs join centroids ON token` intermediate
+in `assign_to_closest_centroid`: every document-token row matches every centroid
+containing that token, so as k rises more centroids carry each token and the
+join fans out. **Memory tracks the join, not the model** -- the same lesson as
+the pagerank tables above, where the group_by/join intermediates rather than
+the score table set the footprint.
+
+Time is much better behaved -- 26 s to 270 s, roughly linear in k, about 1.3 s
+per iteration at k=2 rising to 13.5 s at k=64.
+
+Extrapolating the memory trend, k=128 would land near 250--300 GB. Untested,
+and close enough to the machine's 512 GB to be worth checking before running.
+
 ## What is PolarBar?
 
 An attempt to localize polars' memory use by pulling the joins and

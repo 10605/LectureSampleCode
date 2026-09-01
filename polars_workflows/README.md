@@ -111,6 +111,16 @@ tardigrade-lazy        66.4
 Any other nonzero exit is still raised as a real failure. Measured numbers are
 in `RESULTS.md`.
 
+- **`demo_kmeans.py`** — the same arrangement for `kmeans.py`, sweeping the
+  number of clusters instead of the data size. Reports peak RSS, wall time,
+  iterations actually run, and mean cosine as a quality number. On RCV1 memory
+  grows *superlinearly in k* — the `docs ⋈ centroids ON token` intermediate,
+  not the centroid table (see `RESULTS.md`).
+
+  ```
+  python3 demo_kmeans.py --vectors ../data/RCV1.full_train.tfidf.tsv --k 2 4 8 16 32
+  ```
+
 - **`wordcount_probe.py`** — stress test on the RCV1 corpus: tokenize, emit
   `(docid##label, token)` pairs, sort and group them through `PolarBar`.
   Flags for corpus size/split, sort batch size, and fan-in (`--fanin 0`
