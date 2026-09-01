@@ -58,7 +58,9 @@ Reading down the columns, the engines fail in the order their designs predict:
 - `polars-lazy` streams the scan, but its `group_by`/`join` still buffer their
   input, so it clears 4M with 476 MB -- just inside the cap -- and dies at 8M.
 - `polarbar-lazy` pushes those two operators out to sorted files on disk and
-  survives 8M at 402 MB, then spends over an hour on 16M without finishing.
+  survives 8M at 402 MB, then spends over an hour on 16M without finishing --
+  it needs ~710 MB there, so it does not fit rather than misbehaving. See
+  "Why polarbar runs over at 16M" below.
 - `tardigrade-lazy` holds **65 MB across a 32x growth in data** -- 13% of the
   budget, and the same footprint at 32M lines as at 1M -- because its external
   merge sort bounds memory by batch size rather than by input size.
@@ -74,6 +76,94 @@ Two caveats on how these were collected. Polarbar's `over` at 16M was measured
 by killing it after an hour by hand; the `--timeout` flag that now records this
 automatically was added afterwards. And the `-` column is inference, not
 measurement: an engine that OOMs or runs over at 16M was not given 32M.
+
+### Why polarbar runs over at 16M
+
+`over` in that table is not a near-death OOM. Polarbar uses the *least* memory
+of the three polars configurations at every size, and clears 8M at 402 MB where
+both plain-polars variants are already dead. Giving it headroom, at 16M with 10
+iterations:
+
+    cap       outcome   peak RSS   elapsed
+    512 MB       over          -         -
+    1 GB           ok   710.6 MB   368.7 s
+    2 GB           ok   758.0 MB   364.9 s
+
+It needs ~710--760 MB at 16M and simply does not fit in 512 MB. 1 GB is enough,
+and the 6 minutes there matches the ~3x container slowdown of its 125.4 s on
+iStudio -- so nothing pathological happens once it fits. It degrades into
+thrashing rather than being killed because much of the overage is reclaimable;
+see the next section.
+
+Where does polarbar spend it? Profiling the phases at two sizes, uncapped:
+
+                    4M edges    16M edges
+    after sink       268.0 MB     633.0 MB
+    after sort       289.6 MB     633.0 MB
+    after group      289.6 MB     633.0 MB
+
+Peak RSS only rises, so the flat sort and group rows mean **neither ever
+exceeds what the sink already allocated**. `bar.py`'s external merge sort and
+its sorted-file aggregation are doing exactly what they promise -- bounded
+memory. All the growth is in `sink_kv_pairs`, which is just polars `sink_csv`
+over the parse pipeline. Polarbar is not a low-memory design that leaks; it is
+a low-memory design whose *polars front end* sets the high-water mark.
+
+### What peak RSS actually includes
+
+This one applies to **every table in this file**, so it is worth stating
+plainly: for an uncompressed local file, polars memory-maps the input, and the
+mapped pages count toward RSS as the scan touches them.
+
+Measuring a bare `scan_lines -> sink_csv` with no parsing at all:
+
+    input file   peak RSS   RSS - file
+         21 MB    132.6 MB      112 MB
+         42 MB    190.8 MB      149 MB
+         83 MB    288.7 MB      206 MB
+        166 MB    371.5 MB      206 MB
+        333 MB    540.8 MB      208 MB
+
+From 83 MB up it is exactly `file_size + ~206 MB`, slope 1.0. Nothing is being
+materialized: `prefetch_limit` is `num_pipelines * 2` chunks
+(`polars-stream/src/nodes/io_sources/lines.rs`), bounded regardless of file
+size. The slope is the file itself. `ndjson/mod.rs:417` names the branch --
+"uncompressed local file mmapp'ed, or streaming async with transparent
+decompression" -- and the prediction that follows holds. Same 16M-edge data:
+
+    plain text  166 MB on disk   374.5 MB peak
+    gzipped      77 MB on disk   179.8 MB peak
+
+Compressed input takes the async path and never lands in RSS. Parquet is
+mmapped too -- the byte source is shared (`DynByteSourceBuilder::Mmap`), and
+`parquet/row_group_data_fetch.rs:152` describes "a mmapped or in-memory slice
+representing the entire file" -- but what is mapped is the *compressed* file,
+with decompression bounded per row group:
+
+    text, scan_lines + regex parse   166 MB on disk   625.9 MB peak
+    parquet, scan_parquet             75 MB on disk   499.3 MB peak
+
+Two things not to over-read there. Those two rows are not the same work -- the
+parquet columns are already `src`/`dst`, so that run skips the regex -- and
+separating the mmap saving from the skipped parse would need a third
+measurement. And mmap explains the *slope*, not the intercept: both still sit
+~430 MB above their file size, which is the polars runtime plus the sink's own
+buffers.
+
+So the peak-RSS columns above are inflated by mapped input bytes that are
+clean, file-backed and reclaimable -- not a genuine memory requirement. At 32M
+edges that is 333 MB of every polars-family number, while `tardigrade-lazy`,
+which reads with ordinary Python file I/O, pays none of it. The conclusions
+survive (polars-lazy at 3093.7 MB is still an order of magnitude above
+tardigrade's 89.5 MB with 333 MB subtracted), but the comparison is not
+like-for-like, and the effect is largest on the engine that looks best of the
+three: polarbar at 32M goes 2183.9 -> ~1851 MB.
+
+It also explains the two failure modes under a cap. Anonymous memory -- polars'
+Arrow buffers -- cannot be reclaimed, so exceeding the cap means SIGKILL, which
+is what `polars-lazy` gets at 8M. Mapped file pages can be evicted and re-read,
+so exceeding the cap means slowdown, not death: polarbar at 512 MB thrashes for
+an hour instead of dying.
 
 ### How much RAM does polars-lazy actually need?
 
