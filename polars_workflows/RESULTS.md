@@ -25,48 +25,55 @@ tardigrade-lazy         5.0        11.7        23.9        50.1       106.5     
 The table above was measured on iStudio, which has 512 GB of RAM. At that size
 nothing is ever under memory pressure: polars' out-of-core budget defaults to
 unlimited (see `MEMORY_DIAGNOSIS.md`), so it never spills, and the low-memory
-engines never get to show what they are for. The differences are real but they
+engines never get to show what they are for. The differences are real, but they
 are only differences of degree.
 
 Re-run under a hard **512 MB** cap -- same graphs, same 10 iterations, same
-polars 1.44.1 -- the differences become differences of kind. See
-`README.md` ("Running under a memory cap") for the container recipe.
+polars 1.44.1 -- they become differences of kind. See `README.md` ("Running
+under a memory cap") for the container recipe.
 
-`OOM` is a run the kernel killed for exceeding the cap. `-` has not been run
-yet.
+- `OOM`  -- the kernel killed the run for exceeding the cap.
+- `over` -- the run was still going after an hour and was abandoned.
+- `-`    -- not run: the engine had already failed at the size before it.
+
+Peak RSS is rounded to whole MB.
 
 self RSS (MB)     1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
 ---------------------------------------------------------------------------------------
 polars-eager            285         362         OOM         OOM         OOM           -
 polars-lazy             247         369         476         OOM         OOM           -
-polarbar-lazy           172         222         285         402           -           -
-tardigrade-lazy          65          65          65          66           -           -
+polarbar-lazy           172         222         285         402        over           -
+tardigrade-lazy          65          65          65          66          65          65
 
 elapsed (s)       1,020,000   2,020,000   4,020,000   8,020,000  16,020,000  32,020,000
 ---------------------------------------------------------------------------------------
 polars-eager            0.8         1.5         OOM         OOM         OOM           -
 polars-lazy             0.8         1.5         4.8         OOM         OOM           -
-polarbar-lazy          18.5        36.9        77.3       179.3           -           -
-tardigrade-lazy        16.4        37.2        75.6       157.6           -           -
+polarbar-lazy          18.5        36.9        77.3       179.3        over           -
+tardigrade-lazy        16.4        37.2        75.6       157.6       328.9       747.1
 
-Reading down the columns, the engines fail in the order the design predicts:
+Reading down the columns, the engines fail in the order their designs predict:
 
 - `polars-eager` pins every line in RAM and dies first, at 4M lines.
-- `polars-lazy` streams the scan but its `group_by`/`join` still buffer, so it
-  survives 4M (476 MB, just inside the cap) and dies at 8M.
-- `polarbar-lazy` pushes those two operators out to sorted files on disk and is
-  still running at 8M, at 402 MB.
-- `tardigrade-lazy` holds ~65 MB across an 8x growth in data -- 13% of the
-  budget -- because its external merge sort bounds memory by batch size rather
-  than by input size.
+- `polars-lazy` streams the scan, but its `group_by`/`join` still buffer their
+  input, so it clears 4M with 476 MB -- just inside the cap -- and dies at 8M.
+- `polarbar-lazy` pushes those two operators out to sorted files on disk and
+  survives 8M at 402 MB, then spends over an hour on 16M without finishing.
+- `tardigrade-lazy` holds **65 MB across a 32x growth in data** -- 13% of the
+  budget, and the same footprint at 32M lines as at 1M -- because its external
+  merge sort bounds memory by batch size rather than by input size.
 
-The cost is time: at 8M lines tardigrade takes 158 s against polars-lazy's
-OOM, and against 5 s at 4M where polars-lazy still fits. The lecture point is
-the trade, not the ranking -- an engine that finishes slowly beats one that
-does not finish.
+The cost is time, and it is not small: tardigrade needs 747 s at 32M lines,
+where polars-lazy needed 5 s at 4M before it stopped fitting at all. That is
+the trade the lecture is about. On a machine with enough RAM polars is roughly
+100x faster and the comparison is uninteresting; under a cap, the ranking that
+matters is *finishes* vs *does not finish*, and only the external-sort engine
+finishes everywhere.
 
-Peak RSS here is rounded to whole MB, as reported per run while the sweep was
-in progress. The 16M and 32M rows were still running when this was written.
+Two caveats on how these were collected. Polarbar's `over` at 16M was measured
+by killing it after an hour by hand; the `--timeout` flag that now records this
+automatically was added afterwards. And the `-` column is inference, not
+measurement: an engine that OOMs or runs over at 16M was not given 32M.
 
 ## What is PolarBar?
 

@@ -156,6 +156,12 @@ def run_single(mode, path, iterations, engine='polars', batch_size=None):
     print(f'ELAPSED_S {elapsed:.2f}')
 
 
+def _mark(row, config, marker):
+    """Record a non-finishing run under every metric, so the column stays full."""
+    for key in ('rss', 'child', 's'):
+        row[key][config] = marker
+
+
 def _was_oom_killed(returncode):
     """Did the kernel SIGKILL this run for exceeding a memory limit?
 
@@ -173,7 +179,8 @@ def _parse_marker(text, marker):
     return float('nan')
 
 
-def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
+def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None,
+               timeout=None):
     """Spawn a fresh subprocess per (config, edges) and tabulate peak RSS.
 
     `configs` is a list of (engine, mode) pairs. The printed table puts one
@@ -199,13 +206,20 @@ def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
                    '--iterations', str(iterations)]
             if batch_size is not None:
                 cmd += ['--batch_size', str(batch_size)]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # An engine can thrash rather than die outright under a tight
+                # memory cap. Give up on it and keep sweeping.
+                print(' over', file=sys.stderr)
+                _mark(row, (engine, mode), 'over')
+                continue
             if _was_oom_killed(proc.returncode):
                 # Expected when running under a memory cap: record it and keep
                 # sweeping, so one engine dying doesn't hide the others.
                 print(' OOM', file=sys.stderr)
-                for key in ('rss', 'child', 's'):
-                    row[key][(engine, mode)] = None
+                _mark(row, (engine, mode), 'OOM')
                 continue
             if proc.returncode != 0:
                 print(' FAILED', file=sys.stderr)
@@ -223,8 +237,10 @@ def run_matrix(nodes, edge_sizes, iterations, configs, batch_size=None):
 
 
 def _cell(value, width):
-    """One table cell: a number, or OOM where the run was killed."""
-    return f'{"OOM":>{width}}' if value is None else f'{value:>{width}.1f}'
+    """One table cell: a number, or a marker for a run that did not finish."""
+    if isinstance(value, str):                       # OOM, over -- see run_matrix
+        return f'{value:>{width}}'
+    return f'{value:>{width}.1f}'
 
 
 def _print_matrix(rows, configs, nodes, iterations):
@@ -283,6 +299,9 @@ if __name__ == '__main__':
                         help='edge counts to sweep for the comparison table')
     parser.add_argument('--iterations', type=int, default=10,
                         help='pagerank iterations per run')
+    parser.add_argument('--timeout', type=float, default=None,
+                        help='seconds to allow each run before giving up on it '
+                             'and recording "over" in the table (default: wait)')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='tardigrade: rows per sorted run '
                              f'(default: {TARDIGRADE_BATCH_SIZE:,}). '
@@ -297,4 +316,5 @@ if __name__ == '__main__':
     else:
         configs = [tuple(c.split('-')) for c in args.configs]
         run_matrix(args.nodes, args.edges, args.iterations,
-                   configs=configs, batch_size=args.batch_size)
+                   configs=configs, batch_size=args.batch_size,
+                   timeout=args.timeout)
