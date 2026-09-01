@@ -16,7 +16,42 @@ def show(msg, df, k=10):
         df = df.head(k).collect(engine='streaming')
     print(df)
 
-def pagerank(edge_lines, reset=0.15, num_iterations=30):
+def name_nodes(scores_df, node_names):
+    """Label each node with its name, for graphs that ship a name table.
+
+    `node_names` is a csv of (node_id, name) -- data/enwiki-2013-names.csv.gz
+    maps the node numbers in data/enwiki-2013.txt.gz to Wikipedia concepts.
+
+    Parsed a line at a time rather than with scan_csv, because that file
+    escapes quotes the C way, as \\" inside the field:
+
+        3535,"International Festival for Vocal Music \\"a cappella\\""
+
+    csv wants them doubled instead, so a csv reader ends the field early and
+    then swallows following lines looking for the close -- silently, and on
+    this file it loses 1.75M of the 4.2M names.  Matching to the *last* quote
+    on the line handles both the escapes and the commas inside names.
+
+    The table has a row per node in the graph and only ten are being shown,
+    so filter before joining.  A node with no name keeps a null.
+    """
+    if node_names is None:
+        return scores_df
+    names_df = (
+        pl.scan_lines(node_names)
+        .with_columns(row=pl.col('line').str.extract_groups(r'^(\d+),"(.*)"$'))
+        .with_columns(node=pl.col('row').struct['1'],
+                      name=pl.col('row').struct['2'])
+        .filter(pl.col('node').is_in(scores_df['node']))
+        # unescape, now that the field has been split off whole
+        .with_columns(name=pl.col('name').str.replace_all('\\"', '"', literal=True))
+        .select('node', 'name')
+        .collect(engine='streaming')
+    )
+    return scores_df.join(names_df, on='node', how='left')
+
+
+def pagerank(edge_lines, reset=0.15, num_iterations=30, node_names=None):
 
     # construct edges
     edges = (
@@ -89,9 +124,9 @@ def pagerank(edge_lines, reset=0.15, num_iterations=30):
     elapsed = time.time() - start
     pagerank_scores=pagerank_scores.sort('score', descending=True)
     print('top pagerank_scores:')
-    print(pagerank_scores.head(10))
+    print(name_nodes(pagerank_scores.head(10), node_names))
     print('bottom pagerank_scores:')
-    print(pagerank_scores.tail(10))
+    print(name_nodes(pagerank_scores.tail(10), node_names))
     print('scores collected [pure polar]:',elapsed,'sec')
 
 if __name__ == "__main__":
@@ -102,6 +137,10 @@ if __name__ == "__main__":
                         help='reset (teleport) probability')
     parser.add_argument('--num_iterations', type=int, default=30,
                         help='number of pagerank iterations')
+    parser.add_argument('--node_names', default=None,
+                        help='csv of (node_id, name) to label the top and '
+                             'bottom scores with, e.g. '
+                             '../data/enwiki-2013-names.csv.gz')
     parser.add_argument('--verbose', type=int, default=1,
                         help='verbosity level: 1 shows show() output, 0 suppresses it')
     args = parser.parse_args()
@@ -121,4 +160,5 @@ if __name__ == "__main__":
         lines = pl.scan_lines(process.stdout)
     else:
         lines = pl.scan_lines(filename)
-    pagerank(lines, reset=args.reset, num_iterations=args.num_iterations)
+    pagerank(lines, reset=args.reset, num_iterations=args.num_iterations,
+             node_names=args.node_names)
