@@ -75,6 +75,38 @@ by killing it after an hour by hand; the `--timeout` flag that now records this
 automatically was added afterwards. And the `-` column is inference, not
 measurement: an engine that OOMs or runs over at 16M was not given 32M.
 
+### How much RAM does polars-lazy actually need?
+
+The 512 MB cap above only says polars-lazy fails. Sweeping the cap says what it
+would take to succeed -- polars-lazy alone, on the same two graphs, 10
+iterations:
+
+cap       16M: outcome       RSS       s    32M: outcome       RSS       s
+--------------------------------------------------------------------------
+1 GB               OOM         -       -             OOM         -       -
+2 GB                ok    1399.9    12.2             OOM         -       -
+4 GB                ok    1456.5    12.1              ok    2597.4    23.5
+8 GB                ok    1419.4    11.8              ok    2641.1    23.5
+
+Two things fall out of this.
+
+**The threshold is real and sharp.** 16M lines needs somewhere between 1 and
+2 GB; 32M lines needs between 2 and 4 GB. Roughly 85 bytes of RAM per input
+line, and it doubles when the input doubles -- memory is a linear function of
+data size, which is exactly what a non-streaming aggregation looks like.
+
+**Extra headroom changes nothing.** At 16M lines polars uses ~1.4 GB whether it
+is given 2, 4 or 8 GB, and takes ~12 s in every case; at 32M it uses ~2.6 GB
+under both 4 and 8 GB caps. It does not expand to fill available memory, and --
+more to the point -- it does not contract either. There is no adaptive
+spilling: the footprint is set by the data, and a cap below it is not a
+constraint polars works within but a wall it hits. This is the behavioural
+consequence of the unlimited default OOC budget documented in
+`MEMORY_DIAGNOSIS.md`, seen from the outside.
+
+Contrast tardigrade, which finishes the 32M graph in 65 MB -- 40x less than
+polars needs, and the same 65 MB it uses on the 1M graph.
+
 ## What is PolarBar?
 
 An attempt to localize polars' memory use by pulling the joins and
