@@ -8,7 +8,8 @@ import json
 import logging
 import os
 from pprint import pprint
-from subprocess import Popen, PIPE
+from concurrent.futures import ThreadPoolExecutor
+from subprocess import CompletedProcess, Popen, PIPE
 from subprocess import run as run_subproc
 import shlex
 import sys
@@ -70,6 +71,8 @@ class Cloud(CloudBase):
                 
     def sshp(self, command):
         """Run a shell command on all workers in parallel.
+
+        Returns a list of the workers where the command failed.
         """
         sample_command = f'ssh {self.ssh_args()} {self.workers[0]} {command}'
         logging.info(f'sample command: {sample_command}')
@@ -78,11 +81,21 @@ class Cloud(CloudBase):
                 shlex.split(f'ssh {self.ssh_args()} {worker} {command}'),
                 text=True, stderr=PIPE, stdout=PIPE)
             for worker in self.workers]
-        #self._completion_progress(processes, show_unfinished=True, workers=self.workers) ***
-        self._completion_progress(processes)
-        for proc, worker in zip(processes, self.workers):
-            self._report(proc, worker)
-            proc.wait()
+        # drain stdout/stderr in background threads, so a worker that
+        # writes a lot of output can't block forever on a full pipe
+        with ThreadPoolExecutor(max_workers=len(processes)) as pool:
+            outputs = [pool.submit(proc.communicate) for proc in processes]
+            #self._completion_progress(processes, show_unfinished=True, workers=self.workers) ***
+            self._completion_progress(processes)
+        failed = []
+        for proc, worker, output in zip(processes, self.workers, outputs):
+            stdout, stderr = output.result()
+            self._report(
+                CompletedProcess(proc.args, proc.returncode, stdout, stderr),
+                worker)
+            if proc.returncode:
+                failed.append(worker)
+        return failed
 
     def ssh1(self, command):
         """Run a shell command on one worker.
@@ -214,20 +227,27 @@ class Driver(Cloud):
     def map_only(self, main_script, main_class, src, dst):
         """A map-only job.
         """
-        self.sshp(f'python3 -m fire {main_script} {main_class}'
-                  + f' do_map --src {src} --dst {dst}')
+        if self.sshp(f'python3 -m fire {main_script} {main_class}'
+                     + f' do_map --src {src} --dst {dst}'):
+            sys.exit(1)
 
     def map_reduce(self, main_script, main_class, src, dst):
         """A map-reduce job.
         """
 
         print('map and shuffle phase')
-        self.sshp(f' python3 -m fire {main_script} {main_class}'
-                  + f' do_map_and_shuffle -src {src}')
+        failed = self.sshp(f' python3 -m fire {main_script} {main_class}'
+                           + f' do_map_and_shuffle -src {src}')
+        if failed:
+            print(f'map phase failed on {len(failed)} worker(s); skipping reduce')
+            sys.exit(1)
 
         print('gather and reduce phase')
-        self.sshp(f'python3 -m fire {main_script} {main_class}'
-                  + f' do_gather_reduce --src {src} --dst {dst}')
+        failed = self.sshp(f'python3 -m fire {main_script} {main_class}'
+                           + f' do_gather_reduce --src {src} --dst {dst}')
+        if failed:
+            print(f'reduce phase failed on {len(failed)} worker(s)')
+            sys.exit(1)
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
