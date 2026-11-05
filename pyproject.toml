@@ -5,8 +5,9 @@ description = "Sample code used in 10-605 lectures"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fire>=0.7.1",
     "polars>=1.43",
-    "tqdm>=4.70.0",
+    "tqdm>=4.70.1",
 ]
 
 [tool.uv]

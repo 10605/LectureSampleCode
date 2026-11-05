@@ -1,5 +1,8 @@
 # note: console is https://us-east-2.console.aws.amazon.com/ec2/home?region=us-east-2#Instances:v=3;$case=tags:true%5C,client:false;$regex=tags:false%5C,client:false;sort=desc:instanceState
 
+# run python inside the uv project env (../pyproject.toml)
+PY = uv run python
+
 default:
 	echo make targets: 'stop launch wc_[ctr|nano|micro|hz|spork]'
 
@@ -35,38 +38,38 @@ workers.json:
 # cluster test
 
 wc_hz: workers.json
-	python3 hazsoup.py cloud setup --local_files wc_hz.py
-	python3 hazsoup.py fs put ../data/brown_nolines.txt brown.txt
-	python3 hazsoup.py run map_reduce wc_hz.py WordCount brown.txt browncounts.txt
-	python3 hazsoup.py fs get_merge browncounts.txt /tmp/brown_counts.txt
+	$(PY) hazsoup.py cloud setup --local_files wc_hz.py
+	$(PY) hazsoup.py fs put ../data/brown_nolines.txt brown.txt
+	$(PY) hazsoup.py run map_reduce wc_hz.py WordCount brown.txt browncounts.txt
+	$(PY) hazsoup.py fs get_merge browncounts.txt /tmp/brown_counts.txt
 	head /tmp/brown_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 wc_enron: workers.json
-	python3 hazsoup.py cloud setup --local_files wc_hz.py
-	python3 hazsoup.py fs put ~/Documents/data/enron/enron-clean.txt enron.txt
-	time python3 hazsoup.py run map_reduce wc_hz.py WordCount enron.txt enroncounts.txt
-	python3 hazsoup.py fs get_merge enroncounts.txt /tmp/enron_counts.txt
+	$(PY) hazsoup.py cloud setup --local_files wc_hz.py
+	$(PY) hazsoup.py fs put ~/Documents/data/enron/enron-clean.txt enron.txt
+	time $(PY) hazsoup.py run map_reduce wc_hz.py WordCount enron.txt enroncounts.txt
+	$(PY) hazsoup.py fs get_merge enroncounts.txt /tmp/enron_counts.txt
 	head /tmp/enron_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/enron_counts.txt
 
 # local tests
 
 wc_ctr:
-	python3 wc_ctr.py
+	$(PY) wc_ctr.py
 
 wc_nano:
-	python3 -m fire wc_nano.py \
+	$(PY) -m fire wc_nano.py \
 	  WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
 	head /tmp/brown_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 wc_micro:
-	python3 -m fire wc_micro.py \
+	$(PY) -m fire wc_micro.py \
 	  WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
 	head /tmp/brown_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/brown_counts.txt
 
 wc_spork:
-	python3 wc_spork.py
+	$(PY) wc_spork.py
 
