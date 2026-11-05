@@ -4,22 +4,34 @@
 PY = uv run python
 
 default:
-	echo make targets: 'stop launch wc_[ctr|nano|micro|hz|spork]'
+	echo make targets: 'launch stop terminate wc_[ctr|nano|micro|hz|spork]'
 
-# stop all running instances
+# cluster instances are tagged Name=$(CLUSTER), so the targets below
+# only touch them, not any other instances in the region
+
+CLUSTER = hazsoup
+K ?= 4
+
+# list ids of cluster instances; append more --filters args to narrow it
+LIST_IDS = aws ec2 describe-instances --output text \
+	--query 'Reservations[].Instances[].InstanceId' \
+	--filters Name=tag:Name,Values=$(CLUSTER)
+
+# stop the running cluster instances (their disks are still billed)
 
 stop:
-	aws ec2 stop-instances --instance-ids `aws ec2 describe-instances | grep -i instanceid | cut -d\" -f4`
+	ids=`$(LIST_IDS) Name=instance-state-name,Values=pending,running`; \
+	if [ -n "$$ids" ]; then aws ec2 stop-instances --instance-ids $$ids; \
+	else echo no running $(CLUSTER) instances; fi
 
-# launch a cluster
+# delete the cluster instances and their disks for good
 
-launch_k:
-	aws ec2 run-instances \
-	    --image-id ami-0c803b171269e2d72 \
-	    --instance-type t2.micro \
-	    --security-groups launch-wizard-1 \
-	    --key-name hazsoup \
-	    --count $(K) > launch-log.json
+terminate:
+	ids=`$(LIST_IDS) Name=instance-state-name,Values=pending,running,stopping,stopped`; \
+	if [ -n "$$ids" ]; then aws ec2 terminate-instances --instance-ids $$ids; \
+	else echo no $(CLUSTER) instances; fi
+
+# launch a cluster of K instances, e.g., make launch K=8
 
 launch:
 	aws ec2 run-instances \
@@ -27,12 +39,20 @@ launch:
 	    --instance-type t2.micro \
 	    --security-groups launch-wizard-1 \
 	    --key-name hazsoup \
-	    --count 4 > launch-log.json
+	    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=$(CLUSTER)}]' \
+	    --count $(K) > launch-log.json
 
-# workers.json maps internal machine names to their external names
+launch_k: launch
 
+# workers.json maps internal machine names to their external names.
+# It's rebuilt every time, since instances get new external names
+# whenever they are started.
+
+.PHONY: workers.json
 workers.json:
-	aws ec2 describe-instances --query 'Reservations[].Instances[].[PrivateDnsName,PublicDnsName]' \
+	aws ec2 describe-instances --filters Name=tag:Name,Values=$(CLUSTER) \
+	    Name=instance-state-name,Values=running \
+	    --query 'Reservations[].Instances[].[PrivateDnsName,PublicDnsName]' \
 	> workers.json
 
 # cluster test
