@@ -178,7 +178,8 @@ class SimpleWorker(CloudBase):
         # shard is missing), so the driver sees a nonzero return code
         check_call(merge_sort_cmd, shell=True)
 
-        # TODO: use itertools.group_by
+        # reduce_utils illustrates how this works, but the library routine
+        # itertools.groupby could be used instead
 
         # create a generator for the sorted pairs so we can reduce
         def pair_generator():
