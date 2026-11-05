@@ -1,7 +1,9 @@
 # emacs
 *~
+\#*#
+.#*
 
-# AMS keys
+# AWS keys
 hazsoup/*.pem
 
 # misc output files

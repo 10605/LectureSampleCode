@@ -1,12 +1,15 @@
 Sample code to illustrate map-reduce concepts.  Examples of how to
-invoke the code are in Makefile.  Most of these use the 'fire' package
-instead of argparse: for example
+invoke the code are in Makefile.  Dependencies are managed with uv
+(see ../pyproject.toml), so commands are run with `uv run python`,
+which uses the project environment; the Makefile does this for you.
+
+Most of these use the 'fire' package instead of argparse: for example
 
 ```
-python3 -m fire wc_nano.py WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
+uv run python -m fire wc_nano.py WordCount map_reduce --src ../data/brown_nolines.txt --dst /tmp/brown_counts.txt 
 ```
 
-is equivalent to running `python3 -i wc_nano.py` and typing in the command 
+is equivalent to running `uv run python -i wc_nano.py` and typing in the command 
 
 ```
 WordCount().map_reduce(src="../data/brown_nolines.txt", dst="/tmp/brown_counts.txt")
@@ -31,8 +34,8 @@ Contents:
  * `wc_micro.py`: wordcount using `hz_micro.py` for the back end.
 
  * `hazsoup.py`, `hz_worker.py`, `reduce_util.py`: parallel
-   memory-efficient map-reduce.  This still uses Unix sort, and worked
-   on AWS in Fall 2025.
+   memory-efficient map-reduce.  This still uses Unix sort, and works
+   on AWS as of Nov 2026.
  * `wc_hz.py`: wordcount using full hazsoup for the back end.
 
  * `spork_micro.py`, `reduce_util.py` - a spark-like backend, which like the old
