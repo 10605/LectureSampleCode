@@ -134,7 +134,7 @@ class Cloud(CloudBase):
         self.sshp("pip3 install fire")
         logging.info('uploading core')
         self.upload(
-            f"hz_worker.py reduce_util.py "
+            f"hz_worker.py merge_sort.py reduce_util.py "
             + f"{self.worker_file} {self.keypair_file}")
         self.sshp(f"chmod 400 {self.keypair_file}")
         if local_files is not None:

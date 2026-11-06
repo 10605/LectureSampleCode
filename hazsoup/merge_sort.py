@@ -90,6 +90,15 @@ class _SpillFileIndex:
         self.close()
 
 
+def merge_sorted_files(input_paths, output_path, key: KeyFn = line_prefix_key):
+    """Merge files whose lines are already sorted by key into output_path.
+    """
+    merged = heapq.merge(*[_keyed_lines_from(p, key) for p in input_paths],
+                         key=_BY_KEY)
+    with open(output_path, 'w') as fp:
+        fp.writelines(map(_LINE, merged))
+
+
 def merge_sort_file(input_path,
                     output_path,
                     key: KeyFn = line_prefix_key,

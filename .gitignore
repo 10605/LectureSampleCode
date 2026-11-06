@@ -10,6 +10,8 @@ hazsoup/*.pem
 autodiff/*.gv
 autodiff/*.gv.pdf
 hazsoup/*.json
+# jrast/deduped-text-v1 from huggingface, ~10Gb of parquet shards
+hazsoup/deduped-text-v1/
 unix-poetry/*.wc
 
 # large downloaded corpora (enwiki-2013 etc)
