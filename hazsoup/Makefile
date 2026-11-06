@@ -73,6 +73,22 @@ wc_enron: workers.json
 	head /tmp/enron_counts.txt
 	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/enron_counts.txt
 
+# ~1Gb of text: the first 4 shards of the deduped-text-v1 corpus, one
+# document per line
+
+DEDUP_1G = ../data/deduped-1g.txt
+
+$(DEDUP_1G):
+	$(PY) parquet_to_lines.py $@ $(wordlist 1,4,$(sort $(wildcard deduped-text-v1/shard_*.parquet)))
+
+wc_dedup_1g: workers.json $(DEDUP_1G)
+	$(PY) hazsoup.py cloud setup --local_files wc_hz.py
+	$(PY) hazsoup.py fs put $(DEDUP_1G) dedup1g.txt
+	time $(PY) hazsoup.py run map_reduce wc_hz.py WordCount dedup1g.txt dedup1gcounts.txt
+	$(PY) hazsoup.py fs get_merge dedup1gcounts.txt /tmp/dedup1g_counts.txt
+	head /tmp/dedup1g_counts.txt
+	egrep -w '(the|of|and|to|in|that|is|was|he)' /tmp/dedup1g_counts.txt
+
 # local tests
 
 wc_ctr:

@@ -18,6 +18,8 @@ unix-poetry/*.wc
 data/*.gz
 # RCV1, used by polars_workflows/wordcount_probe.py -- ~1Gb for the train split
 data/RCV1.*
+# text converted from hazsoup/deduped-text-v1 by hazsoup/parquet_to_lines.py
+data/deduped-*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
