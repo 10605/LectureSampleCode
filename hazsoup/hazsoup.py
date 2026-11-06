@@ -224,10 +224,18 @@ class Driver(Cloud):
     """Invokes workers appropriately to complete a task.
     """
 
+    def _fire(self, main_script, main_class):
+        """Worker command prefix to run a method of main_class.
+
+        TMPDIR=. keeps merge_sort's spill files on the worker's disk;
+        /tmp on Amazon Linux 2023 is a RAM-backed tmpfs.
+        """
+        return f'TMPDIR=. {self.worker_python} -m fire {main_script} {main_class}'
+
     def map_only(self, main_script, main_class, src, dst):
         """A map-only job.
         """
-        if self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
+        if self.sshp(self._fire(main_script, main_class)
                      + f' do_map --src {src} --dst {dst}'):
             sys.exit(1)
 
@@ -236,14 +244,14 @@ class Driver(Cloud):
         """
 
         print('map and shuffle phase')
-        failed = self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
+        failed = self.sshp(self._fire(main_script, main_class)
                            + f' do_map_and_shuffle -src {src}')
         if failed:
             print(f'map phase failed on {len(failed)} worker(s); skipping reduce')
             sys.exit(1)
 
         print('gather and reduce phase')
-        failed = self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
+        failed = self.sshp(self._fire(main_script, main_class)
                            + f' do_gather_reduce --src {src} --dst {dst}')
         if failed:
             print(f'reduce phase failed on {len(failed)} worker(s)')
