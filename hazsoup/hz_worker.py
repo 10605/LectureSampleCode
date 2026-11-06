@@ -20,6 +20,8 @@ import reduce_util as ru
 WORKER_FILENAME = 'workers.json'
 CLOUD_USERNAME = 'ec2-user'
 KEYPAIR_FILE = 'hazsoup.pem'
+# merge_sort.py needs 3.12 (itertools.batched); AL2023 packages it as python3.12
+WORKER_PYTHON = 'python3.12'
 
 class CloudBase:
     """Base class for using a set of ec2 workers.
@@ -30,6 +32,7 @@ class CloudBase:
         self.worker_file = WORKER_FILENAME
         self.cloud_username = CLOUD_USERNAME
         self.keypair_file = KEYPAIR_FILE
+        self.worker_python = WORKER_PYTHON
         try:
             internal_external_pairs = json.load(open(self.worker_file))
             # remove pairs without external DNS

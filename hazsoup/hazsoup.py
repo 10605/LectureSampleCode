@@ -128,10 +128,10 @@ class Cloud(CloudBase):
     def setup(self, local_files=None):
         """Commands needed to initialize an ec2 cluster.
         """
-        logging.info('installing pip')
-        self.sshp("sudo yum install python3-pip -y")
-        logging.info('installing fire')
-        self.sshp("pip3 install fire")
+        logging.info(f'installing {self.worker_python}')
+        self.sshp(f"sudo yum install {self.worker_python} {self.worker_python}-pip -y")
+        logging.info('installing fire and tqdm')
+        self.sshp(f"{self.worker_python} -m pip install --user fire tqdm")
         logging.info('uploading core')
         self.upload(
             f"hz_worker.py merge_sort.py reduce_util.py "
@@ -227,7 +227,7 @@ class Driver(Cloud):
     def map_only(self, main_script, main_class, src, dst):
         """A map-only job.
         """
-        if self.sshp(f'python3 -m fire {main_script} {main_class}'
+        if self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
                      + f' do_map --src {src} --dst {dst}'):
             sys.exit(1)
 
@@ -236,14 +236,14 @@ class Driver(Cloud):
         """
 
         print('map and shuffle phase')
-        failed = self.sshp(f' python3 -m fire {main_script} {main_class}'
+        failed = self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
                            + f' do_map_and_shuffle -src {src}')
         if failed:
             print(f'map phase failed on {len(failed)} worker(s); skipping reduce')
             sys.exit(1)
 
         print('gather and reduce phase')
-        failed = self.sshp(f'python3 -m fire {main_script} {main_class}'
+        failed = self.sshp(f'{self.worker_python} -m fire {main_script} {main_class}'
                            + f' do_gather_reduce --src {src} --dst {dst}')
         if failed:
             print(f'reduce phase failed on {len(failed)} worker(s)')
